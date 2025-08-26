@@ -74,8 +74,6 @@ hist(p_value %>% unlist)
 species_contami=data.frame(species=species_test,p_value=unlist(p_value))
 
 ####2、top_genus
-###物种组成(genus)——corplot
-##目标物种（每种里面的top-5放在一起画heatmap）
 #DNA-NP
 data <- read.table("DNA_genus_NP_relative_filter_all.csv",header = T,sep = ",",row.names = 1,stringsAsFactors = FALSE) #data=species_decontam
 #data <- data[rowSums(data != 0) > (ncol(data) / 2), ]
@@ -463,5 +461,6 @@ for (i in 1:7) {
 }
 par(mfrow=c(3,3));for (i in 1:7) {plot(fit[[i]]$gam,xaxt = "n", main =paste(names(split_data)[i])) 
   axis(1, at = 1:4, labels = 1:4)}
+
 
 
