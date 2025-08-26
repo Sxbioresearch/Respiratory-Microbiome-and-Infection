@@ -1,0 +1,1188 @@
+---
+title: "host_transcriptome_analysis"
+author: "Jing Yang"
+date: "2024-12-27"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+## Loading packages
+## Defining variables
+```{r}
+pacman::p_load(ggplot2,dplyr,ggsci,ggpubr,DESeq2,edgeR,limma)
+color_three_samtypes=c("#FFB10F","#FF9D9A","#499894")
+color_five_times=c("#374E55FF","#B24745FF","#DF8F44FF","#00A1D5FF","#00937C")
+```
+
+
+## Viral load: copies/ng human DNA
+```{r}
+## viral load qPCR standard curves N & ORF1ab target
+calculate_cv <- function(ct_values) {
+  mean_ct <- mean(ct_values)
+  sd_ct <- sd(ct_values)
+  cv <- (sd_ct / mean_ct) * 100
+  return(cv)
+}
+N_std_curve_cv=aggregate(vic~copies.ul,data=N_std_curve,calculate_cv)
+mean(N_std_curve_cv$vic)
+
+
+model <- lm(vic ~ log.copies.ul, data = N_std_curve)
+summary(model)
+coef(model)
+
+text <- paste("Slope = -3.474", "Effciency = 94.04%", "R2 = 0.997", "Ct CV = 1.12%", sep = "\n")
+ggplot(N_std_curve, aes(x = log.copies.ul, y = vic)) +
+  geom_point() + geom_smooth(method = "lm", se = FALSE, color = "blue") + 
+  labs(title = "N target qPCR Standard Curve",x = "Log copies/ul",y = "Ct Value") +
+  geom_text(aes(x = 5, y = 30, label = text), size = 4)+theme_bw()+
+  theme(
+    axis.title=element_text(size = 15),
+    axis.text.x= element_text(size = 15,angle = 0),
+    axis.text.y= element_text(size = 15),
+    legend.position ="none",
+    strip.text = element_text(size = 15))
+
+ORF1ab_std_curve_cv=aggregate(fam~copies.ul,data=ORF1ab_std_curve,calculate_cv)
+mean(ORF1ab_std_curve_cv$fam)
+
+model <- lm(fam ~ log.copies.ul, data = ORF1ab_std_curve)
+summary(model)
+coef(model)
+
+text <- paste("Slope = -3.471", "Effciency = 94.13%", "R2 = 0.9897", "Ct CV = 1.92%", sep = "\n")
+ggplot(ORF1ab_std_curve, aes(x = log.copies.ul, y = fam)) +
+  geom_point() +  
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +  
+  labs(title = "ORF1ab target qPCR Standard Curve",x = "Log copies/ul",y = "Ct Value") + 
+  geom_text(aes(x = 5, y = 32, label = text), size = 4)+theme_bw()+
+  theme(
+    axis.title=element_text(size = 15),
+    axis.text.x= element_text(size = 15,angle = 0),
+    axis.text.y= element_text(size = 15),
+    legend.position ="none",
+    strip.text = element_text(size = 15))
+
+
+## normalized viral load using N target
+model <- lm(vic ~ log.copies.ul, data = N_std_curve)
+rna_meta_lab1$viral_load=(rna_meta_lab1$N-coef(model)[1])/coef(model)[2]
+rna_meta_lab1$viral_load=10^rna_meta_lab1$viral_load
+rna_meta_lab1$normlized_viral_load=rna_meta_lab1$viral_load/rna_meta_lab1$ACTIN.ng.ul.
+rna_meta_lab1$log10_normalized_viral_load=log10(rna_meta_lab1$normlized_viral_load)##+1 psedocount
+#####delta Ct and raw Ct, for positive sample########
+rna_meta_lab1$delta_ct=rna_meta_lab1$N-rna_meta_lab1$RNaseP
+rna_meta_lab1$normalized_ct=rna_meta_lab1$N-(rna_meta_lab1$RNaseP-mean(na.omit(rna_meta_lab1$RNaseP)))
+
+
+## using delta Ct to estimate the two missing values of normalized viral load because of lacking actin measurement.
+model_np=lm(log10_normalized_viral_load ~ normalized_ct, data = rna_meta_lab1[rna_meta_lab1$time==2 & rna_meta_lab1$样本类型2=="NP",])
+
+rna_meta_lab1[rna_meta_lab1$time==2 & rna_meta_lab1$样本类型2=="NP" & is.na(rna_meta_lab1$log10_normalized_viral_load),"log10_normalized_viral_load"] <- stats::predict(model_np, newdata = data.frame(normalized_ct=c(rna_meta_lab1[rna_meta_lab1$time==2 & rna_meta_lab1$样本类型2=="NP" & is.na(rna_meta_lab1$log10_normalized_viral_load),"normalized_ct"])))
+
+model_op=lm(log10_normalized_viral_load ~ normalized_ct, data = rna_meta_lab1[rna_meta_lab1$time==2 & rna_meta_lab1$样本类型2=="OP",])
+
+rna_meta_lab1[rna_meta_lab1$time==2 & rna_meta_lab1$样本类型2=="OP" & is.na(rna_meta_lab1$log10_normalized_viral_load),"log10_normalized_viral_load"] <- stats::predict(model_op, newdata = data.frame(normalized_ct=c(rna_meta_lab1[rna_meta_lab1$time==2 & rna_meta_lab1$样本类型2=="OP" & is.na(rna_meta_lab1$log10_normalized_viral_load),"normalized_ct"])))
+
+## Negative Ct = 46
+#min(na.omit(rna_meta_lab1$normlized_viral_load))
+#rna_meta_lab1$normlized_viral_load[rna_meta_lab1$Result2=="Negtive"]=0
+rna_meta_lab1$log10_normalized_viral_load_psedo1=log10(10^(rna_meta_lab1$log10_normalized_viral_load)+1)
+rna_meta_lab1$log10_normalized_viral_load_psedo1[rna_meta_lab1$Result2=="Negtive"]=log10(1)
+rna_meta_lab1$log10_normalized_viral_load[rna_meta_lab1$Result2=="Negtive"]=log10(0.0001)
+
+###viral load and sars-cov-2 sequence reads (time1 and 2 positive)
+
+table(rna_meta_lab1[rna_meta_lab1$Result2=="Positive" & rna_meta_lab1$time %in% c(1,2),c("样本类型2","time")])
+
+## viral load between time points and sample type, projecting days post onset
+onset=read.table("F:/AAAA/Others/covid_urt_2024/onset_date.txt",sep = "\t",header = T)
+sample_date=read_xlsx("F:/AAAA/Others/covid_urt_2024/中日43人采样时间点.xlsx") %>% as.data.frame()
+onset$onset_date=as.Date(onset$onset_date)
+
+sample_date$T1=as.Date(sample_date$T1);sample_date$T2=as.Date(sample_date$T2);sample_date$T3=as.Date(sample_date$T3);sample_date$T4=as.Date(sample_date$T4)
+
+## adjust error date
+rna_meta_lab1=left_join(rna_meta_lab1,onset)
+rna_meta_lab1$采样时间[rna_meta_lab1$采样时间=="2022/1/10"]="2022/12/10"
+rna_meta_lab1$采样时间[rna_meta_lab1$采样时间=="2023/12/10"]="2022/12/10"
+rna_meta_lab1$采样时间[rna_meta_lab1$采样时间=="2023/12/17"]="2022/12/17"
+rna_meta_lab1$采样时间[rna_meta_lab1$采样时间=="2023/12/19"]="2022/12/19"
+rna_meta_lab1$采样时间[rna_meta_lab1$采样时间=="2023/12/21"]="2022/12/21"
+rna_meta_lab1$采样时间[rna_meta_lab1$采样时间=="2023/10/6"]="2023/1/6"
+
+rna_meta_lab1$days_post_onset=as.numeric(as.Date(rna_meta_lab1$采样时间)-as.Date(rna_meta_lab1$onset_date))
+
+ggplot(rna_meta_lab1[rna_meta_lab1$姓名缩写 %in% t1_pos & rna_meta_lab1$time %in% c(1,2) & rna_meta_lab1$样本类型2!="Sputum",],
+       aes(x=time,y=log10_normalized_viral_load))+
+  geom_boxplot(aes(color=time),width=0.5,outlier.shape = NA)+
+  geom_line(aes(group = 姓名缩写),color="grey70")+
+  geom_point(aes(size=days_post_onset,color=time),shape=1)+
+  labs(y="Log10 viral load (copies/ng human DNA)",x="Sample Time")+
+  stat_compare_means(comparisons = list(c("1","2")),paired = T)+
+  theme_classic()+
+  scale_color_manual(values = color_five_times[1:2],name="Time")+
+  scale_size_continuous(range = c(-2,8),limits = c(-2, 8),name = "Days post onset")+
+  theme(axis.title = element_text(size = 12),
+        axis.text = element_text(size = 12),
+        axis.ticks.y = element_blank(),
+        legend.text = element_text(size = 8),
+        legend.position = "right")+
+  facet_wrap(.~样本类型2)
+
+
+
+####Figure 1B####
+ggplot(rna_meta_lab1[rna_meta_lab1$样本类型2!="Sputum",],
+       aes(x=time,y=log10_normalized_viral_load))+
+  geom_violin(width=1,outlier.shape = NA,trim = T)+
+  geom_line(aes(group = 姓名缩写),color="grey90")+
+  geom_point(aes(color=Result2),size=0.8)+
+  #size=days_post_onset,#,shape=1#,position = position_dodge2(width = 0.5)
+  labs(y="Log10 viral load (copies/ng human DNA)",x="Sample Time")+
+  stat_compare_means(comparisons = list(c("1","2"),c("2","3"),c("2","4")),paired = F)+
+  theme_test()+
+  scale_color_manual(values = color_five_times[1:4],name="SARS-CoV-2 PCR test")+
+  theme(axis.title = element_text(size = 12),
+        axis.text = element_text(size = 12),
+        axis.ticks.y = element_blank(),
+        legend.text = element_text(size = 8),
+        legend.position = "top")+
+  facet_wrap(.~样本类型2)
+
+
+
+##peak viral load##
+zr_individual_meta$np_peak_viral_load=lapply(zr_individual_meta$姓名缩写,function(x){return(max(rna_meta_lab1$log10_normalized_viral_load[rna_meta_lab1$样本类型2=="NP" & rna_meta_lab1$姓名缩写==x]))}) %>% as.numeric()
+
+zr_individual_meta$np_peak_run=lapply(zr_individual_meta$姓名缩写,function(x){return(rna_meta_lab1$Run[rna_meta_lab1$样本类型2=="NP" & rna_meta_lab1$姓名缩写==x & rna_meta_lab1$log10_normalized_viral_load==max(rna_meta_lab1$log10_normalized_viral_load[rna_meta_lab1$样本类型2=="NP" & rna_meta_lab1$姓名缩写==x])])}) %>% as.character()
+
+zr_individual_meta$op_peak_viral_load=lapply(zr_individual_meta$姓名缩写,function(x){return(max(rna_meta_lab1$log10_normalized_viral_load[rna_meta_lab1$样本类型2=="OP" & rna_meta_lab1$姓名缩写==x]))}) %>% as.numeric()
+
+zr_individual_meta$op_peak_run=lapply(zr_individual_meta$姓名缩写,function(x){return(rna_meta_lab1$Run[rna_meta_lab1$样本类型2=="OP" & rna_meta_lab1$姓名缩写==x & rna_meta_lab1$log10_normalized_viral_load==max(rna_meta_lab1$log10_normalized_viral_load[rna_meta_lab1$样本类型2=="OP" & rna_meta_lab1$姓名缩写==x])])}) %>% as.character()
+
+zr_individual_meta$sputum_peak_viral_load=lapply(zr_individual_meta$姓名缩写,function(x){return(max(rna_meta_lab1$log10_normalized_viral_load[rna_meta_lab1$样本类型2=="Sputum" & rna_meta_lab1$姓名缩写==x]))}) %>% as.numeric()
+
+zr_individual_meta$sputum_peak_run=lapply(zr_individual_meta$姓名缩写,function(x){return(rna_meta_lab1$Run[rna_meta_lab1$样本类型2=="Sputum" & rna_meta_lab1$姓名缩写==x])}) %>% as.character()
+
+peak_viral_load=rbind(data.frame(姓名缩写=zr_individual_meta$姓名缩写,peak_viral_load=zr_individual_meta$np_peak_viral_load,Run=zr_individual_meta$np_peak_run,样本类型2="NP"),data.frame(姓名缩写=zr_individual_meta$姓名缩写,peak_viral_load=zr_individual_meta$op_peak_viral_load,Run=zr_individual_meta$op_peak_run,样本类型2="OP")) %>% rbind(.,data.frame(姓名缩写=zr_individual_meta$姓名缩写,peak_viral_load=zr_individual_meta$sputum_peak_viral_load,Run=zr_individual_meta$sputum_peak_run,样本类型2="Sputum"))
+
+peak_viral_load=peak_viral_load[peak_viral_load$peak_viral_load != -Inf & peak_viral_load$姓名缩写!="YZX",]
+peak_viral_load=peak_viral_load[order(peak_viral_load$姓名缩写),]
+
+peak_viral_load$Run[c(5,27,37,45,48,52,56,70,77,81)]=lapply(peak_viral_load$Run[c(5,27,37,45,48,52,56,70,77,81)],function(x){strsplit(x,split = ",") %>% unlist() %>% .[2] %>% gsub("\"","",.) %>% gsub(" ","",.)}) %>% unlist()
+peak_viral_load=left_join(peak_viral_load,select(rna_meta_lab1,Run,days_post_onset))
+
+
+####FigureS1B
+ggplot(peak_viral_load[peak_viral_load$样本类型2!="Sputum",],aes(x=样本类型2,y=peak_viral_load))+
+  geom_boxplot(aes(color=样本类型2),width=0.5,outlier.shape = NA)+
+  geom_line(aes(group = 姓名缩写),color="grey70")+
+  geom_point(aes(size=days_post_onset,color=样本类型2),shape=1)+
+  labs(y="Log10 peak viral load (copies/ng human DNA)",x="")+
+  stat_compare_means(comparisons = list(c("NP","OP")),paired = T)+#,c("NP","Sputum"),c("OP","Sputum")
+  theme_bw()+
+  scale_color_manual(values = color_three_samtypes,name="Sample type")+
+  scale_size_continuous(range = c(-2,8),limits = c(-2, 8),name = "Days post onset")+
+  theme(axis.title = element_text(size = 12),
+        axis.text = element_text(size = 12),
+        axis.ticks.y = element_blank(),
+        legend.text = element_text(size = 8),
+        legend.position = "right")
+
+wilcox.test(peak_viral_load$peak_viral_load[peak_viral_load$样本类型2=="NP" & peak_viral_load$姓名缩写 %in% peak_viral_load$姓名缩写[peak_viral_load$样本类型2=="Sputum"]],
+            peak_viral_load$peak_viral_load[peak_viral_load$样本类型2=="Sputum"],
+            paired = T)
+
+wilcox.test(peak_viral_load$peak_viral_load[peak_viral_load$样本类型2=="OP" & peak_viral_load$姓名缩写 %in% peak_viral_load$姓名缩写[peak_viral_load$样本类型2=="Sputum"]],
+            peak_viral_load$peak_viral_load[peak_viral_load$样本类型2=="Sputum"],
+            paired = T)
+
+
+## viral load correlation among different respiratory tracts parts
+data <- data.frame(
+  NP = rna_meta_lab1$log10_normalized_viral_load[rna_meta_lab1$样本类型2=="NP" & rna_meta_lab1$time==2],
+  OP = rna_meta_lab1$log10_normalized_viral_load[rna_meta_lab1$样本类型2=="OP" & rna_meta_lab1$time==2]
+)
+data$姓名缩写=rna_meta_lab1$姓名缩写[rna_meta_lab1$样本类型2=="NP" & rna_meta_lab1$time==2]
+data=left_join(data,select(rna_meta_lab1[rna_meta_lab1$样本类型2=="Sputum",],姓名缩写,log10_normalized_viral_load))
+names(data)[4]="Sputum"
+cor.test(data$NP,data$OP,method = "spearman")
+data=select(data,-姓名缩写)
+ggpairs(data, 
+        diag = list(continuous = "barDiag"),
+        lower = list(continuous = wrap("smooth", method = "lm", se = TRUE)),
+        upper = list(continuous = wrap("cor", method = "spearman", size = 5, stars = TRUE)),
+        title = "Correlation of viral loads at different respiratory sites")
+```
+
+
+####差异基因和 富集分析
+## Differential expressed genes and go term enrichment analysis
+```{r}
+####NP#########
+meta.data=select(rna_meta_lab1,姓名缩写,Run,time,样本类型2,days_post_onset)
+meta.data=meta.data[meta.data$姓名缩写 %in% setdiff(t1_neg,"YZX") & meta.data$样本类型2 !="Sputum",]
+
+meta.data=left_join(meta.data,select(zr_individual_meta,姓名缩写,Age,Gender,BMI))
+names(meta.data)[4]="Type"
+names(meta.data)[1]="id"
+hrna_symbol_np=hrna_symbol[,meta.data$Run[meta.data$Type=="NP"]]
+colSums(hrna_symbol_np) %>% sort() %>% .[1:10]
+hrna_symbol_np=hrna_symbol_np[,colSums(hrna_symbol_np)>10000]
+##只保留配对样本
+meta.data.np=meta.data[meta.data$Type=="NP",]
+meta.data.np=meta.data.np[meta.data.np$Run %in% colnames(hrna_symbol_np),]
+all(meta.data.np$Run==colnames(hrna_symbol_np))
+tmp=names(which(table(meta.data.np$id)==4)) ##24人共96个样本
+meta.data.np=meta.data.np[meta.data.np$id %in% tmp,]
+hrna_symbol_np=hrna_symbol_np[,meta.data.np$Run]
+all(meta.data.np$Run==colnames(hrna_symbol_np))
+colSums(hrna_symbol_np) %>% summary()
+
+#####过滤低表达gene 
+keepGene=lapply(tmp, function(x){
+  tt=edgeR::cpm(hrna_symbol_np)[,meta.data.np$Run[meta.data.np$id==x]]
+  keepGene=rownames(tt)[rowSums(tt>5)>1] ###要求4个时间点都表达，会把那个在单独时间点表达量极高的gene扔掉
+  ####一个人的数据，至少在1个时间点cpm超过5
+  return(keepGene)
+})
+keepGene_np=Reduce(union,keepGene)
+
+hrna_symbol_np=hrna_symbol_np[keepGene,]
+###104个样本，保留15505个gene做差异分析##
+
+meta.data.np$time=factor(meta.data.np$time,levels = c("1","2","3","4"),
+                          labels = c("T1","T2","T3","T4"))
+meta.data.np$id=as.factor(meta.data.np$id)
+
+#####DEG#####
+dds <- DESeqDataSetFromMatrix(countData = hrna_symbol_np+1, 
+                              colData = meta.data.np, 
+                              design = ~ id+time)#+Age+Gender+BMI 配对的DEseq2是不存在这个问题的
+dds = DESeq(dds) ## time consuming
+
+contr <- makeContrasts(T2 - T1,T3 - T1,T4 - T1, 
+                       levels = c("T1","T2","T3","T4"))
+# Create DE gene list for DESeq2
+DE.genes.deseq2.np_1w <- list()
+
+for (i in seq_len(ncol(contr))){
+  contrast.name <- colnames(contr)[i]
+  DEseq.contrast <- rownames(contr)[contr[,i] != 0]
+  res <- results(dds, c("time", DEseq.contrast[2], DEseq.contrast[1]), tidy = T)
+  rownames(res) <- res$row
+  res.ordered <- res[order(res$pvalue),]
+  res.significant <- subset(res.ordered, padj <= 1)
+  res.significant <- subset(res.significant, abs(log2FoldChange) >= 0)
+  DE.genes.deseq2.np_1w[[contrast.name]] <- res.significant
+}
+
+
+######OP#######
+hrna_symbol_op=hrna_symbol[,meta.data$Run[meta.data$Type=="OP"]]
+colSums(hrna_symbol_op) %>% sort() %>% .[1:30]
+hrna_symbol_op=hrna_symbol_op[,colSums(hrna_symbol_op)>10000]
+##只保留配对样本
+meta.data.op=meta.data[meta.data$Type=="OP",]
+meta.data.op=meta.data.op[meta.data.op$Run %in% colnames(hrna_symbol_op),]
+all(meta.data.op$Run==colnames(hrna_symbol_op))
+tmp=names(which(table(meta.data.op$id)==4)) ##24人共96个样本
+meta.data.op=meta.data.op[meta.data.op$id %in% tmp,]
+hrna_symbol_op=hrna_symbol_op[,meta.data.op$Run]
+all(meta.data.op$Run==colnames(hrna_symbol_op))
+colSums(hrna_symbol_op) %>% summary()
+
+#####过滤低表达gene
+keepGene=lapply(tmp, function(x){
+  tt=edgeR::cpm(hrna_symbol_op)[,meta.data.op$Run[meta.data.op$id==x]]
+  keepGene=rownames(tt)[rowSums(tt>5)>1] 
+  ####一个人的数据，至少在1个时间点cpm超过5
+  return(keepGene)
+})
+keepGene_op=Reduce(union,keepGene)
+
+hrna_symbol_op=hrna_symbol_op[keepGene,]
+## same pipeline for OP
+load("F:/AAAA/Others/covid_urt_2024/DE.genes.deseq2.op_1w.RData")
+
+### volcano plot
+res=DE.genes.deseq2.op_1w$`T2 - T1`
+res$group=NA
+res$group[res$log2FoldChange>2 & res$padj<0.05]="Upregulated"
+res$group[res$log2FoldChange< -2 & res$padj<0.05]="Downregulated"
+res$group[is.na(res$group)]="NS"
+res$group=factor(res$group,levels = c("Upregulated","Downregulated","NS"))
+table(res$group)
+res1=res[res$padj<0.05,]
+res1$tmp=abs(res1$log2FoldChange)
+res1=res1[order(res1$log2FoldChange,decreasing = T),]
+
+##Figure3A/B，NP就是res=DE.genes.deseq2.np_1w$`T2 - T1`
+p2=ggplot(res, aes(x = log2FoldChange, y = -log10(padj), colour = group))+
+  geom_point()+scale_color_manual(values=c('brown','steelblue','gray'))+
+  ylab('-log10 (q-value)')+#ylim(0,35)+
+  xlab('log2 (FoldChange)')+#xlim(-5.5,8)+
+  ggtitle("T2 vs T1 OP")+
+  geom_text_repel(data = res1[1:20,],aes(label = row),size = 4,
+                  color = "black",max.overlaps = getOption("ggrepel.max.overlaps", default = 40),
+                  segment.color = "black", show.legend = FALSE)+
+  geom_vline(xintercept = c(-2,2),lty = 2, col = "black", lwd = 0.5)+
+  geom_hline(yintercept = -log10(0.05), lty = 2, col = "black", lwd = 0.5)+
+  theme_test()+theme(
+    axis.title=element_text(size = 15),
+    axis.text.x= element_text(size = 15,angle = 0),
+    axis.text.y= element_text(size = 15),
+    legend.position ="none",
+    strip.text = element_text(size = 15),
+    plot.title=element_text(margin=margin(t=30,b=-30),color = "#8C564BFF",face="bold"))
+
+library(patchwork)
+p1/p2
+
+
+
+# GO term enrichment analysis
+#NP
+np_dge=list(DE.genes.deseq2.np_1w$`T2 - T1`$row[DE.genes.deseq2.np_1w$`T2 - T1`$log2FoldChange>2 & DE.genes.deseq2.np_1w$`T2 - T1`$padj<0.05],
+            DE.genes.deseq2.np_1w$`T3 - T1`$row[DE.genes.deseq2.np_1w$`T3 - T1`$log2FoldChange>2 & DE.genes.deseq2.np_1w$`T3 - T1`$padj<0.05],
+            DE.genes.deseq2.np_1w$`T4 - T1`$row[DE.genes.deseq2.np_1w$`T4 - T1`$log2FoldChange>2 & DE.genes.deseq2.np_1w$`T4 - T1`$padj<0.05]
+            )#,gene_down_2_1,gene_down_3_1,gene_down_4_1
+np_dge=lapply(np_dge,function(x){mapIds(org.Hs.eg.db,
+                                        keys=x,
+                                        column="ENTREZID",
+                                        keytype="SYMBOL",
+                                        multiVals="first") %>% as.character()})
+
+names(np_dge)=c("NP T2 Up","NP T3 Up","NP T4 Up")
+ck_np= compareCluster(geneClusters = np_dge,
+                      fun = "enrichGO",
+                      universe= names(geneList),
+                      OrgDb= org.Hs.eg.db,
+                      ont= "ALL",
+                      pAdjustMethod = "none",
+                      pvalueCutoff  = 0.01,
+                      qvalueCutoff  = 1,
+                      readable = TRUE)
+ck_np <- setReadable(ck_np, OrgDb = org.Hs.eg.db, keyType="ENTREZID")
+
+p1 = dotplot(ck_np,showCategory=5,color="pvalue")+
+  theme(axis.text.x = element_text(angle = 90),
+        axis.text.y = element_text(size=10))+
+  xlab("")+ggtitle("NP Enriched GO terms")
+
+
+#op
+op_dge=list(DE.genes.deseq2.op_1w$`T2 - T1`$row[DE.genes.deseq2.op_1w$`T2 - T1`$log2FoldChange>2 & DE.genes.deseq2.op_1w$`T2 - T1`$padj<0.05],
+            DE.genes.deseq2.op_1w$`T3 - T1`$row[DE.genes.deseq2.op_1w$`T3 - T1`$log2FoldChange>2 & DE.genes.deseq2.op_1w$`T3 - T1`$padj<0.05],
+            DE.genes.deseq2.op_1w$`T4 - T1`$row[DE.genes.deseq2.op_1w$`T4 - T1`$log2FoldChange>2 & DE.genes.deseq2.op_1w$`T4 - T1`$padj<0.05]
+            )#,gene_down_2_1,gene_down_3_1,gene_down_4_1
+op_dge=lapply(op_dge,function(x){mapIds(org.Hs.eg.db,
+                                        keys=x,
+                                        column="ENTREZID",
+                                        keytype="SYMBOL",
+                                        multiVals="first") %>% as.character()})
+
+names(op_dge)=c("OP T2 Up","OP T3 Up","OP T4 Up")
+ck_op= compareCluster(geneClusters = op_dge,
+                      fun = "enrichGO",
+                      universe= names(geneList),
+                      OrgDb= org.Hs.eg.db,
+                      ont= "ALL",
+                      pAdjustMethod = "none",
+                      pvalueCutoff  = 0.01,
+                      qvalueCutoff  = 1,
+                      readable = TRUE)
+ck_op <- setReadable(ck_op, OrgDb = org.Hs.eg.db, keyType="ENTREZID")
+
+p2 = dotplot(ck_op,showCategory=5,color="pvalue")+
+  theme(axis.text.x = element_text(angle = 90),
+        axis.text.y = element_text(size=10))+
+  xlab("")+ggtitle("OP Enriched GO terms")
+
+p1+p2
+
+## Top 10 enriched go terms and associated genes for NP and OP in T2
+
+# Do not wasting time
+# np_enriched_go=ck_np@compareClusterResult$ID[ck_np@compareClusterResult$Cluster =="NP T2 Up" & ck_np@compareClusterResult$p.adjust<0.01]
+# 
+# np_sig_go_levels=sapply(np_enriched_go, function(x) Secondary(GOTERM[[x]]))
+
+###Figure3D
+library(GOplot)
+tmp=ck_np@compareClusterResult[order(ck_np@compareClusterResult$p.adjust,decreasing = F),]
+tmp=tmp[tmp$Cluster=="NP T2 Up" & tmp$ONTOLOGY=="BP" & tmp$p.adjust<0.05 & tmp$Count>12,] ##!!write in paper
+enriched_np=data.frame(Category=tmp$ID,
+                       Term=tmp$Description,
+                       adj_pval=tmp$p.adjust,
+                       Genes=lapply(tmp$geneID,function(x){gsub("\\/",", ",x)}) %>% unlist)
+
+tmp=ck_op@compareClusterResult[order(ck_op@compareClusterResult$p.adjust,decreasing = F),]
+tmp=tmp[tmp$Cluster=="OP T2 Up" & tmp$ONTOLOGY=="BP",]
+enriched_op=data.frame(Category=tmp$ID,
+                       Term=tmp$Description,
+                       adj_pval=tmp$p.adjust,
+                       Genes=lapply(tmp$geneID,function(x){gsub("\\/",", ",x)}) %>% unlist)
+
+
+gene_data_np=data.frame(ID=lapply(enriched_np$Genes,function(x){strsplit(x,split = ", ") %>% unlist}) %>% unlist() %>% unique)
+tmp=select(DE.genes.deseq2.np_1w$`T2 - T1`,row,log2FoldChange)
+names(tmp)[1]="ID"
+gene_data_np=left_join(gene_data_np,tmp)
+names(gene_data_np)[2]="logFC"
+
+gene_data_op=data.frame(ID=lapply(enriched_op$Genes,function(x){strsplit(x,split = ", ") %>% unlist}) %>% unlist() %>% unique)
+tmp=select(DE.genes.deseq2.op_1w$`T2 - T1`,row,log2FoldChange)
+names(tmp)[1]="ID"
+gene_data_op=left_join(gene_data_op,tmp)
+names(gene_data_op)[2]="logFC"
+
+
+circ_OP <- circle_dat(terms = enriched_op, genes = gene_data_op)
+circ_NP <- circle_dat(terms = enriched_np, genes = gene_data_np)
+
+chord_op=chord_dat(data = circ_OP, genes = gene_data_op, process = unique(enriched_op$Term))
+chord_np=chord_dat(data = circ_NP, genes = gene_data_np, process = unique(enriched_np$Term))
+
+GOChord(chord_op, space = 0.02, gene.order = 'logFC', gene.space = 0.25, gene.size = 3)
+GOChord(chord_np,space = 0.02, gene.order = 'logFC', gene.space = 0.25, gene.size = 3)
+
+## combine NP and OP
+
+circ_np_op=rbind(circ_NP,circ_OP)
+circ_np_op=select(circ_np_op,-count,-logFC)
+circ_np_op=circ_np_op[!duplicated(circ_np_op[,1:3]),]
+
+gene_data_np=rbind(gene_data_np,data.frame(ID=setdiff(gene_data_op$ID,gene_data_np$ID),logFC=0))
+chord_np=chord_dat(data = circ_np_op, genes = gene_data_np, process = unique(circ_np_op$term))
+
+GOChord(chord_np,space = 0.02, gene.order = 'logFC', gene.space = 0.25, gene.size = 3,
+        lfc.min = 0,lfc.max = 7.6,border.size = NA,
+        ribbon.col = pal_simpsons()(15),
+        lfc.col = c("brown","white"))
+
+
+gene_data_op=rbind(gene_data_op,data.frame(ID=setdiff(gene_data_np$ID,gene_data_op$ID),logFC=0))
+chord_op=chord_dat(data = circ_np_op, genes = gene_data_op, process = unique(circ_np_op$term))
+rownames(gene_data_np)=gene_data_np$ID
+gene_data_op$rank=gene_data_np[gene_data_op$ID,"logFC"]
+
+GOChord(chord_op,space = 0.02, gene.order = 'logFC', gene.space = 0.25, gene.size = 3,
+        lfc.min = 0,lfc.max = 4.2,border.size = NA,
+        ribbon.col = pal_simpsons()(15),
+        lfc.col = c("#D68B81","white"))
+
+```
+
+
+## 量化感染后的抗病毒免疫激活程度: Gene的fold change、通路的delta ssGSEA富集得分, 病毒载量
+```{r}
+viral_response_np=data.frame(Name=setdiff(t1_neg,"YZX"))
+tmp=rna_meta_lab1[rna_meta_lab1$姓名缩写 %in% viral_response_np$Name & rna_meta_lab1$样本类型2=="NP" & rna_meta_lab1$time==1,c("姓名缩写","Run")]
+names(tmp)=c("Name","Run_T1")
+viral_response_np=left_join(viral_response_np,tmp)
+tmp=rna_meta_lab1[rna_meta_lab1$姓名缩写 %in% viral_response_np$Name & rna_meta_lab1$样本类型2=="NP" & rna_meta_lab1$time==2,c("姓名缩写","Run")]
+names(tmp)=c("Name","Run_T2")
+viral_response_np=left_join(viral_response_np,tmp)
+
+## 1.fold change for each patients each upreg genes
+np_up_gene=DE.genes.deseq2.np_1w$`T2 - T1`$row[DE.genes.deseq2.np_1w$`T2 - T1`$log2FoldChange>2 & DE.genes.deseq2.np_1w$`T2 - T1`$padj<0.05]
+
+tmp=hrna_symbol[keepGene_np,rna_meta_lab1$Run[rna_meta_lab1$样本类型2=="NP"]]
+#total_counts=colSums(tmp)
+hrna_symbol.normalized_np=edgeR::cpm(tmp,log = T,prior.count = 1)
+#hrna_symbol.normalized_np <- log2(sweep(tmp,2,total_counts, FUN = "/") * 1e6+1)
+
+for(i in np_up_gene){
+  viral_response_np[,i]=(hrna_symbol.normalized_np[i,viral_response_np$Run_T2])-(hrna_symbol.normalized_np[i,viral_response_np$Run_T1])
+}
+
+## 2.viral load
+rownames(rna_meta_lab1)=rna_meta_lab1$Run
+viral_response_np$viral_load_t2=rna_meta_lab1[viral_response_np$Run_T2,"log10_normalized_viral_load"]
+
+## 3.delta ssGSEA of top GO terms
+go_np_list=vector("list", 12)
+go_np_list=lapply(enriched_np$Category,function(x){
+  mget(c(x),org.Hs.egGO2ALLEGS)  %>% unlist() %>% as.character() %>% mapIds(org.Hs.eg.db,keys=.,column="SYMBOL",keytype="ENTREZID") %>% as.character()
+})
+names(go_np_list)=enriched_np$Term
+
+np_t2_ssgsea=ssgsea(inmat = hrna_symbol.normalized_np,groups = go_np_list,scale = F,minsize = 10)
+
+for(i in enriched_np$Term){
+  viral_response_np[,i]=(np_t2_ssgsea[i,viral_response_np$Run_T2])-(np_t2_ssgsea[i,viral_response_np$Run_T1])
+}
+
+## correlation between those measursments
+library("Hmisc")
+np_measures_cor=rcorr(as.matrix(viral_response_np[,4:163]),type = "spearman")
+library(pheatmap)
+
+pheatmap(np_measures_cor$r %>% as.matrix(), 
+         main = "Correlation Matrix", 
+         cluster_rows = T,
+         cluster_cols = T,
+         show_rownames = TRUE, 
+         show_colnames = TRUE,
+         display_numbers = ifelse(np_measures_cor$P<0.05,"*",""),
+         scale = "none",   # 不对数据进行标准化
+         fontsize = 2,    # 字体大小
+         cellwidth = 2,    # 单元格宽度
+         cellheight = 2,   # 单元格高度
+         legend = TRUE,
+         )
+## measurements vs. days post symptom
+
+
+## OP
+viral_response_op=data.frame(Name=setdiff(t1_neg,"YZX"))
+tmp=rna_meta_lab1[rna_meta_lab1$姓名缩写 %in% viral_response_op$Name & rna_meta_lab1$样本类型2=="OP" & rna_meta_lab1$time==1,c("姓名缩写","Run")]
+names(tmp)=c("Name","Run_T1")
+viral_response_op=left_join(viral_response_op,tmp)
+tmp=rna_meta_lab1[rna_meta_lab1$姓名缩写 %in% viral_response_op$Name & rna_meta_lab1$样本类型2=="OP" & rna_meta_lab1$time==2,c("姓名缩写","Run")]
+names(tmp)=c("Name","Run_T2")
+viral_response_op=left_join(viral_response_op,tmp)
+
+## 1.fold change for each patients each upreg genes
+op_up_gene=DE.genes.deseq2.op_1w$`T2 - T1`$row[DE.genes.deseq2.op_1w$`T2 - T1`$log2FoldChange>2 & DE.genes.deseq2.op_1w$`T2 - T1`$padj<0.05]
+
+tmp=hrna_symbol[keepGene_op,rna_meta_lab1$Run[rna_meta_lab1$样本类型2=="OP"]]
+#total_counts=colSums(tmp)
+hrna_symbol.normalized_op=edgeR::cpm(tmp,log = T,prior.count = 1)
+#hrna_symbol.normalized_op <- log2(sweep(tmp,2,total_counts, FUN = "/") * 1e6+1)
+
+for(i in op_up_gene){
+  viral_response_op[,i]=(hrna_symbol.normalized_op[i,viral_response_op$Run_T2])-(hrna_symbol.normalized_op[i,viral_response_op$Run_T1])
+}
+
+## 2.viral load
+rownames(rna_meta_lab1)=rna_meta_lab1$Run
+viral_response_op$viral_load_t2=rna_meta_lab1[viral_response_op$Run_T2,"log10_normalized_viral_load"]
+viral_response_op$viral_load_t2_psedo1=rna_meta_lab1[viral_response_op$Run_T2,"log10_normalized_viral_load_psedo1"]
+
+## 3.delta ssGSEA of top GO terms
+go_op_list=vector("list", 9)
+go_op_list=lapply(enriched_op$Category,function(x){
+  mget(c(x),org.Hs.egGO2ALLEGS)  %>% unlist() %>% as.character() %>% mapIds(org.Hs.eg.db,keys=.,column="SYMBOL",keytype="ENTREZID") %>% as.character()
+})
+names(go_op_list)=enriched_op$Term
+
+op_t2_ssgsea=ssgsea(inmat = hrna_symbol.normalized_op,groups = go_op_list,scale = F,minsize = 10)
+
+for(i in enriched_op$Term){
+  viral_response_op[,i]=(op_t2_ssgsea[i,viral_response_op$Run_T2])-(op_t2_ssgsea[i,viral_response_op$Run_T1])
+}
+
+## delta Gene scores
+ISG_score=intersect(rownames(hrna_symbol),ISG_list_new)
+
+tmp=read.table("F:/AAAA/Others/covid_urt_2024/gene_cate/Cytokines.txt",header = T)
+Cytokine_score=intersect(grep("^IL",rownames(hrna_symbol),value = T),tmp$Symbol)
+
+Cytokine_score1=intersect(grep("^IFN",rownames(hrna_symbol),value = T),tmp$Symbol)
+Cytokine_score1=c(Cytokine_score,Cytokine_score1)
+
+Chemokine_score=grep("^CCL|CXCL",rownames(hrna_symbol),value = T)
+
+HLA_score=grep("^HLA",rownames(hrna_symbol),value = T)
+
+## NP
+gene_score_np=data.frame(Run=colnames(hrna_symbol.normalized_np),
+                         ISG_score=apply(hrna_symbol.normalized_np[intersect(ISG_score,rownames(hrna_symbol.normalized_np)),],2,mean),
+                         Cytokine_score=apply(hrna_symbol.normalized_np[intersect(Cytokine_score,rownames(hrna_symbol.normalized_np)),],2,mean),
+                         Cytokine_score1=apply(hrna_symbol.normalized_np[intersect(Cytokine_score1,rownames(hrna_symbol.normalized_np)),],2,mean),
+                         Chemokine_score=apply(hrna_symbol.normalized_np[intersect(Chemokine_score,rownames(hrna_symbol.normalized_np)),],2,mean),
+                         HLA_score=apply(hrna_symbol.normalized_np[intersect(HLA_score,rownames(hrna_symbol.normalized_np)),],2,mean))
+
+tmp1=gene_score_np[viral_response_np$Run_T1,]
+tmp2=gene_score_np[viral_response_np$Run_T2,]
+
+for(i in names(tmp1)[2:6]){
+  viral_response_np[,i]=tmp2[,i]-tmp1[,i] ##适用于log2CPM
+}
+
+## OP
+gene_score_op=data.frame(Run=colnames(hrna_symbol.normalized_op),
+                         ISG_score=apply(hrna_symbol.normalized_op[intersect(ISG_score,rownames(hrna_symbol.normalized_op)),],2,mean),
+                         Cytokine_score=apply(hrna_symbol.normalized_op[intersect(Cytokine_score,rownames(hrna_symbol.normalized_op)),],2,mean),
+                         Cytokine_score1=apply(hrna_symbol.normalized_op[intersect(Cytokine_score1,rownames(hrna_symbol.normalized_op)),],2,mean),
+                         Chemokine_score=apply(hrna_symbol.normalized_op[intersect(Chemokine_score,rownames(hrna_symbol.normalized_op)),],2,mean),
+                         HLA_score=apply(hrna_symbol.normalized_op[intersect(HLA_score,rownames(hrna_symbol.normalized_op)),],2,mean))
+
+tmp1=gene_score_op[viral_response_op$Run_T1,]
+tmp2=gene_score_op[viral_response_op$Run_T2,]
+
+for(i in names(tmp1)[2:6]){
+  viral_response_op[,i]=tmp2[,i]-tmp1[,i]
+}
+
+## correlation between the measurements
+op_measures_cor=rcorr(as.matrix(viral_response_op[,c("viral_load_t2",setdiff(tmp,"viral_load_t2"))]),type = "spearman")
+
+pheatmap(op_measures_cor$r %>% as.matrix(), 
+         main = "Correlation Matrix", 
+         cluster_rows = F,
+         cluster_cols = F,
+         show_rownames = TRUE, 
+         show_colnames = TRUE,
+         display_numbers = ifelse(op_measures_cor$P<0.05,"*",""),
+         scale = "none",
+         fontsize = 9,
+         cellwidth = 8,
+         cellheight = 8,
+         legend = TRUE)
+
+
+
+## no background subtraction
+viral_response_op_no_bs=data.frame(Name=setdiff(t1_neg,"YZX"))
+tmp=rna_meta_lab1[rna_meta_lab1$姓名缩写 %in% viral_response_op_no_bs$Name & rna_meta_lab1$样本类型2=="OP" & rna_meta_lab1$time==1,c("姓名缩写","Run")]
+names(tmp)=c("Name","Run_T1")
+viral_response_op_no_bs=left_join(viral_response_op_no_bs,tmp)
+tmp=rna_meta_lab1[rna_meta_lab1$姓名缩写 %in% viral_response_op_no_bs$Name & rna_meta_lab1$样本类型2=="OP" & rna_meta_lab1$time==2,c("姓名缩写","Run")]
+names(tmp)=c("Name","Run_T2")
+viral_response_op_no_bs=left_join(viral_response_op_no_bs,tmp)
+
+## 1.fold change for each patients each upreg genes
+op_up_gene=DE.genes.deseq2.op_1w$`T2 - T1`$row[DE.genes.deseq2.op_1w$`T2 - T1`$log2FoldChange>2 & DE.genes.deseq2.op_1w$`T2 - T1`$padj<0.05]
+
+tmp=hrna_symbol[keepGene_op,rna_meta_lab1$Run[rna_meta_lab1$样本类型2=="OP"]]
+hrna_symbol.normalized_op=edgeR::cpm(tmp,log = T,prior.count = 1)
+
+for(i in op_up_gene){
+  viral_response_op_no_bs[,i]=(hrna_symbol.normalized_op[i,viral_response_op_no_bs$Run_T2])
+}
+
+## 2.viral load
+rownames(rna_meta_lab1)=rna_meta_lab1$Run
+viral_response_op_no_bs$viral_load_t2=rna_meta_lab1[viral_response_op_no_bs$Run_T2,"log10_normalized_viral_load"]
+viral_response_op_no_bs$viral_load_t2_psedo1=rna_meta_lab1[viral_response_op_no_bs$Run_T2,"log10_normalized_viral_load_psedo1"]
+
+## 3.delta ssGSEA of top GO terms
+go_op_list=vector("list", 9)
+go_op_list=lapply(enriched_op$Category,function(x){
+  mget(c(x),org.Hs.egGO2ALLEGS)  %>% unlist() %>% as.character() %>% mapIds(org.Hs.eg.db,keys=.,column="SYMBOL",keytype="ENTREZID") %>% as.character()
+})
+names(go_op_list)=enriched_op$Term
+
+op_t2_ssgsea=ssgsea(inmat = hrna_symbol.normalized_op,groups = go_op_list,scale = F,minsize = 10)
+
+for(i in enriched_op$Term){
+  viral_response_op_no_bs[,i]=(op_t2_ssgsea[i,viral_response_op_no_bs$Run_T2])
+}
+
+## delta Gene scores
+gene_score_op=data.frame(Run=colnames(hrna_symbol.normalized_op),
+                         ISG_score=apply(hrna_symbol.normalized_op[intersect(ISG_score,rownames(hrna_symbol.normalized_op)),],2,mean),
+                         Cytokine_score=apply(hrna_symbol.normalized_op[intersect(Cytokine_score,rownames(hrna_symbol.normalized_op)),],2,mean),
+                         Cytokine_score1=apply(hrna_symbol.normalized_op[intersect(Cytokine_score1,rownames(hrna_symbol.normalized_op)),],2,mean),
+                         Chemokine_score=apply(hrna_symbol.normalized_op[intersect(Chemokine_score,rownames(hrna_symbol.normalized_op)),],2,mean),
+                         HLA_score=apply(hrna_symbol.normalized_op[intersect(HLA_score,rownames(hrna_symbol.normalized_op)),],2,mean))
+
+tmp1=gene_score_op[viral_response_op_no_bs$Run_T1,]
+tmp2=gene_score_op[viral_response_op_no_bs$Run_T2,]
+
+for(i in names(tmp1)[2:6]){
+  viral_response_op_no_bs[,i]=tmp2[,i]
+}
+
+tmp=intersect(union(immune_gene_all1,circ_OP$genes),colnames(viral_response_op))##上调基因
+tmp=c(tmp,colnames(viral_response_op)[c(75,77:90)])
+tmp=setdiff(tmp,"Cytokine_score")
+
+#viral_response_op_t1
+op_measures_cor=rcorr(as.matrix(viral_response_op_t1[,c("viral_load_t2",setdiff(tmp,"viral_load_t2"))]),type = "spearman")
+
+pheatmap(op_measures_cor$r %>% as.matrix(), 
+         main = "T2 viral load vs. T1 antiviral immune response", 
+         color = colorRampPalette(colors = col)(101),
+         cluster_rows = F,
+         cluster_cols = F,
+         show_rownames = TRUE, 
+         show_colnames = TRUE,
+         display_numbers = ifelse(op_measures_cor$P<0.05,"*",""),
+         scale = "none",
+         fontsize = 9,
+         cellwidth = 8,
+         cellheight = 8,
+         legend = TRUE)
+```
+
+
+## 宿主免疫基因表达谱T1-T4和病毒载量的关系(dbRDA)
+```{r}
+all_res_host=data.frame()
+rownames(op_virus_meta)=op_virus_meta$Run
+
+t1=hrna_symbol[intersect(rownames(hrna_symbol),unique(immune_gene_all1,circ_OP$genes)),
+                                    op_meta$Run[op_meta$time==4 & op_meta$姓名缩写 %in% setdiff(t1_neg,c("YZX"))]]#,"SL"
+
+total_counts <- colSums(t1)
+t1 <- log2(sweep(t1,2,total_counts,FUN = "/")*1e6+1) %>% t()
+
+rownames(t1)=op_virus_meta[rownames(t1),"姓名缩写"]
+
+t2=viral_response_op[,c(75,91)]
+rownames(t2)=viral_response_op$Name
+
+t2=t2[rownames(t1),]
+all(rownames(t1)==rownames(t2))
+
+
+all2=c()
+for(i in c(1:2)){
+  data=t2[,i] %>% as.data.frame()
+  rownames(data)=rownames(t1)
+  names(data)="var"
+  cap <- dbrda(t1 ~ var,data = data,distance="euclidean",na.action=na.omit)
+  av <- anova.cca(cap,by = "margin") %>% as.data.frame()
+  pval <- av$`Pr(>F)`[1]
+  Fstat <- av$`F`[1]
+  r2 <- RsquareAdj(cap)[[1]]
+  adjr2 <- RsquareAdj(cap)[[2]]
+  all2 <- rbind(all2, cbind(Fstat,r2,adjr2,pval))
+}
+all2 <- as.data.frame(cbind(all2, padj=p.adjust(all2[,"pval"], method="BH")), stringsAsFactors=F)
+all2$var=colnames(t2)
+all2$group="T4 Host"
+
+all_res_host=rbind(all_res_host,all2)
+
+viral_load_dbrda_host=data.frame(matrix(NA,nrow = 4,ncol = 2))
+colnames(viral_load_dbrda_host)=unique(all_res_host$var)
+rownames(viral_load_dbrda_host)=unique(all_res_host$group)
+viral_load_dbrda_host$viral_load_t2=all_res_host$r2[all_res_host$var=="viral_load_t2"]
+viral_load_dbrda_host$viral_group=all_res_host$r2[all_res_host$var=="viral_group"]
+
+viral_load_dbrda2=viral_load_dbrda_host
+viral_load_dbrda2$viral_load_t2=all_res_host$pval[all_res_host$var=="viral_load_t2"]
+viral_load_dbrda2$viral_group=all_res_host$pval[all_res_host$var=="viral_group"]
+
+pheatmap(t(viral_load_dbrda_host),
+         cluster_rows = F,cluster_cols = F,
+         color = colorRampPalette(c("#F7F7F7","#FDDBC7","#F4A582","#D6604D","#B2182B","#67001F"))(50),
+         display_numbers = ifelse(t(viral_load_dbrda2)<0.05,"*",""),
+         name = "dbRDA",
+         legend_breaks = seq(0.1, 0, length.out = 11)
+         )
+```
+
+
+## 基线期免疫基因和病毒载量的相关性
+```{r}
+t1=hrna_symbol[intersect(rownames(hrna_symbol),unique(immune_gene_all1,circ_OP$genes)),
+                                    op_meta$Run[op_meta$time==1 & op_meta$姓名缩写 %in% setdiff(t1_neg,c("YZX"))]]#,"SL"
+
+total_counts <- colSums(t1)
+t1 <- log2(sweep(t1,2,total_counts,FUN = "/")*1e6+1) %>% t()
+rownames(op_virus_meta)=op_virus_meta$Run
+rownames(t1)=op_virus_meta[rownames(t1),"姓名缩写"]
+t2=viral_response_op[,c(75,91)]
+rownames(t2)=viral_response_op$Name
+
+t2=t2[rownames(t1),]
+all(rownames(t1)==rownames(t2))
+
+t1_gene_viral_load=data.frame(genes=colnames(t1),cor=NA,p_cor=NA,fc=NA,p_t.test=NA)
+for(i in 1:nrow(t1_gene_viral_load)){
+  test=cor.test(t1[,i] %>% as.numeric(),t2$viral_load_t2,method = "spearman")
+  t1_gene_viral_load$cor[i]=test$estimate;t1_gene_viral_load$p_cor[i]=test$p.value
+  test=wilcox.test(t1[rownames(t2)[t2$viral_group==1],i] %>% as.numeric(),
+                   t1[rownames(t2)[t2$viral_group==0],i] %>% as.numeric())
+  t1_gene_viral_load$fc[i]=(mean(t1[rownames(t2)[t2$viral_group==1],i])+1)/(mean(t1[rownames(t2)[t2$viral_group==0],i])+1)
+  t1_gene_viral_load$p_t.test[i]=test$p.value
+}
+
+t1_gene_viral_load$consistency=ifelse((t1_gene_viral_load$cor>0 & t1_gene_viral_load$fc>1)|(t1_gene_viral_load$cor<0 & t1_gene_viral_load$fc<1),"yes","no")
+
+t1_gene_viral_load_sig=t1_gene_viral_load[t1_gene_viral_load$consistency=="yes" & (t1_gene_viral_load$p_cor<0.05 | t1_gene_viral_load$p_t.test<0.05),]
+
+## spearman显著的是wilcox.test显著的子集？
+tmp1=t1_gene_viral_load_sig$genes[t1_gene_viral_load_sig$p_cor<0.05]
+tmp2=t1_gene_viral_load_sig$genes[t1_gene_viral_load_sig$p_t.test<0.05]
+
+t1_gene_viral_load_sig=t1_gene_viral_load_sig[t1_gene_viral_load_sig$genes %in% tmp1,]
+t1_gene_viral_load_sig=t1_gene_viral_load_sig[order(t1_gene_viral_load_sig$cor,decreasing = T),]
+
+
+##viral load related genes和已知host facors的关联
+host_factors=read.csv("hostfactors.csv")
+tmp=intersect(t1_gene_viral_load_sig$genes,host_factors$Gene.name)
+View(t1_gene_viral_load_sig[t1_gene_viral_load_sig$genes %in% tmp,])
+
+## GSEA，GO terms富集分析
+idss <- mapIds(org.Hs.eg.db,
+               keys=t1_gene_viral_load_sig$genes[1:35],
+               column="ENTREZID",
+               keytype="SYMBOL",
+               multiVals="first")
+
+ego_top35 <- enrichGO(gene= idss,
+                universe= names(geneList),
+                OrgDb= org.Hs.eg.db,
+                ont= "BP",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff = 0.05,
+                readable      = TRUE)
+View(ego_top35@result)
+
+###富集的go terms中文献报道的基因
+
+##p值小于0.25的负相关物种
+t1_gene_viral_load_neg=t1_gene_viral_load[t1_gene_viral_load$consistency=="yes" & t1_gene_viral_load$cor<0 & (t1_gene_viral_load$p_cor<0.25|t1_gene_viral_load$p_t.test<0.25),]
+##没有antiviral的基线期基因，通路
+
+##
+col=c("#053061","#2166AC","#4393C3","#92C5DE","#D1E5F0","#F7F7F7","#FDDBC7","#F4A582","#D6604D","#B2182B","#67001F")
+
+gene_cor_plot=t1_gene_viral_load_sig[plotdata_genes,"cor"] %>% as.data.frame();rownames(gene_cor_plot)=plotdata_genes
+gene_cor_plot1=t1_gene_viral_load_sig[plotdata_genes,"p_cor"] %>% as.data.frame();rownames(gene_cor_plot1)=plotdata_genes
+
+gene_cor_plot$pse="pse"
+gene_cor_plot=gene_cor_plot[order(gene_cor_plot$.,decreasing = T),]
+gene_cor_plot1$pse="pse"
+gene_cor_plot1=gene_cor_plot1[rownames(gene_cor_plot),]
+
+tm1=gene_cor_plot$.[1:35] %>% as.matrix();rownames(tm1)=rownames(gene_cor_plot)[1:35]
+tm2=gene_cor_plot1$.[1:35] %>% as.matrix();rownames(tm2)=rownames(gene_cor_plot1)[1:35]
+
+pheatmap(tm1,
+         cluster_rows = F,cluster_cols = F,
+         color = colorRampPalette(colors=col)(100),
+         display_numbers = ifelse(tm2<0.0001,"****",ifelse(tm2>0.0001 & tm2<0.001,"***",ifelse(tm2>0.001 & tm2<0.01,"**","*"))),
+         name = "Correlation",
+         breaks = seq(-0.6, 0.6, length.out = 101),
+         legend_breaks = seq(-0.6, 0.6, length.out = 21),
+         legend_labels = c("-1", rep("", 4), "-0.5", rep("", 4), "0", 
+                   rep("", 4), "0.5", rep("", 4), "1")
+         )
+##↑替换成下面top20 GO term中包含的viral load相关基因
+
+###可视化富集的GO term
+data=ego@result[order(ego@result$p.adjust),] %>% .[1:20,]
+data$Description=factor(data$Description,levels = rev(data$Description))
+ggplot(data, aes(x =Description, y = -log10(p.adjust))) +
+  geom_bar(stat = "identity", fill = "#67001F",width = 0.5) +
+  coord_flip() +
+  labs(x = "", y = "-Log10(p.adjust)", title = "Top20 enriched pro-viral GO terms") +
+  theme_test()
+
+
+##筛选富集的GO terms, 要求其ssGSEA score也和病毒载量正相关
+#560个pro-viral genes —> 604个 candidate pro-viral go terms —> 52个ssGSEA证实的Pro-viral go terms
+plotdata=ego@result[ego@result$p.adjust<0.05,]
+names(plotdata)[2]="go_term"
+names(plotdata)[6]="go_p.adj"
+plotdata=left_join(dplyr::select(plotdata,go_term,go_p.adj,geneID),t1_go_term_viral_load_sig)
+plotdata=plotdata[!is.na(plotdata$cor),]
+plotdata=plotdata[order(plotdata$cor,decreasing = T),]
+plotdata$go_term=factor(plotdata$go_term,levels = rev(plotdata$go_term))
+
+ggplot(plotdata[1:20,], aes(x = cor, y = go_term)) +
+  geom_segment(aes(x = 0, xend = cor, y = go_term, yend =go_term), 
+               color = "grey30",size=1) +
+  geom_point(size=4,aes(colour = -log10(go_p.adj))) +
+  scale_color_viridis( option = "A",direction = -1)+
+  labs(x = "Correlation between ssGSEA scores and viral load",y="Pro-viral GO terms") +
+  theme_bw()
+
+
+##挑出来相关基因
+plotdata_genes=lapply(plotdata$geneID[1:20],function(x){strsplit(x,split = "\\/") %>% unlist()}) %>% unlist() %>% unique
+
+
+###和文献的overlap##
+host_factors=read.csv("hostfactors.csv")
+host_fac_genes=intersect(host_factors$Gene.name,t1_gene_viral_load_sig$genes)
+
+idss <- mapIds(org.Hs.eg.db,
+               keys=host_fac_genes,
+               column="ENTREZID",
+               keytype="SYMBOL",
+               multiVals="first")
+
+ego_hostfac <- enrichGO(gene= idss,
+                universe= names(geneList),
+                OrgDb= org.Hs.eg.db,
+                ont= "BP",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff = 0.05,
+                readable      = TRUE)
+ego_hostfac@result=ego_hostfac@result[ego_hostfac@result$p.adjust<0.05,]
+View(ego_hostfac@result[ego_hostfac@result$Description %in% rownames(op_t1_ssgsea),])
+
+
+
+##证实的proviral genes
+proviral_genes=read.csv("proviral_genes.csv")
+intersect(proviral_genes$proviral_genes,t1_gene_viral_load_sig$genes)
+
+
+##venn图
+# 定义基因集合
+my_genes <- 560  # 您的560个基因
+literature_genes <- 5075  # 文献中的5075个基因
+overlap_genes <- 218  # 重叠的218个基因
+
+# 创建基因列表
+gene_lists <- list(
+  Your_Genes = t1_gene_viral_load_sig$genes,  # 假设您的基因编号为1到560
+  Literature_Genes = unique(host_factors$Gene.name)# 假设文献中的基因编号为1到10000中的5075个
+)
+
+# 绘制Venn图
+ggVennDiagram(gene_lists, label = "count") +
+  theme(legend.position = "none") +  # 隐藏图例
+  ggtitle("")  # 添加标题
+
+# 定义参数
+total_genes <- 25000  # 假设总基因数为30000（根据实际情况调整）
+my_genes <- 560  # 您的560个基因
+literature_genes <- 5075  # 文献中的5075个基因
+overlap_genes <- 218  # 重叠的218个基因
+
+# 超几何检验
+p_value <- phyper(
+  q = overlap_genes - 1,  # 重叠基因数减1
+  m = literature_genes,   # 文献中的基因数
+  n = total_genes - literature_genes,  # 总基因数减去文献中的基因数
+  k = my_genes,           # 您的基因数
+  lower.tail = FALSE      # 计算上尾概率
+)
+
+# 输出结果
+cat("p-value:", p_value, "\n")
+if (p_value < 0.05) {
+  cat("The overlap is statistically significant (p < 0.05).\n")
+} else {
+  cat("The overlap is not statistically significant (p >= 0.05).\n")
+}
+
+
+
+
+```
+
+
+## NP和OP的差异表达基因
+```{r}
+np_t2_meta=rna_meta_lab1[rna_meta_lab1$样本类型2=="NP" & rna_meta_lab1$time==2,]
+np_t2_meta=np_t2_meta[np_t2_meta$姓名缩写 %in% op_t1_meta$姓名缩写,]
+op_t2_meta=rna_meta_lab1[rna_meta_lab1$样本类型2=="OP" & rna_meta_lab1$time==2,]
+op_t2_meta=op_t2_meta[op_t2_meta$姓名缩写 %in% op_t1_meta$姓名缩写,]
+
+all(op_t1_meta$姓名缩写==np_t1_meta$姓名缩写)
+
+colData=data.frame(samples=c(op_t1_meta$Run,np_t1_meta$Run),
+                   cluster=c(rep("OP",27),rep("NP",27)),
+                   id=c(op_t1_meta$姓名缩写,np_t1_meta$姓名缩写))
+
+colData$cluster=factor(colData$cluster,levels = c("OP","NP"))
+dds <- DESeqDataSetFromMatrix(countData = hrna_symbol[intersect(rownames(hrna_symbol.normalized_op),rownames(hrna_symbol.normalized_np)),
+                                                      c(op_t1_meta$Run,np_t1_meta$Run)]+1, #t1_gene_viral_load_sig$genes
+                              colData = colData, 
+                              design = ~ cluster+id)
+#dds@assays=dds@assays[t1_gene_viral_load_sig$genes,]
+dds = DESeq(dds) ## time consuming
+
+res <- results(dds, contrast = c("cluster", "NP", "OP")) %>% as.data.frame()
+res$group="NS"
+res$group[res$log2FoldChange>2 & res$padj<0.05]="NP"
+res$group[res$log2FoldChange < -2 & res$padj<0.05]="OP"
+res$group=factor(res$group,levels = c("OP","NP","NS"))
+
+res$gene=rownames(res)
+#res$log2FoldChange= -res$log2FoldChange
+
+res_op_np_t1=res
+
+
+##去除T1就有差异的基因
+res=res_op_np_t2[!res_op_np_t2$gene %in% res_op_np_t1$gene[res_op_np_t1$group!="NS"],]
+
+res1=res[which(res$padj<0.05),]
+res1$tmp=abs(res1$log2FoldChange)
+res1=res1[order(res1$tmp,decreasing = T),]
+##标记NP top20genes和OP的7个genes
+tmp=res1$gene[res1$group=="OP"]
+tmp=c(tmp,res1$gene[res1$group=="NP"][1:20])
+
+res1$row=rownames(res1)
+res1=res1[tmp,]
+res1$color=ifelse(res1$gene %in% c(op_up_gene,np_up_gene),"red","black")
+
+###Figure3C
+ggplot(res, aes(x = log2FoldChange, y = -log10(padj), colour = group))+
+  geom_point()+scale_color_manual(values=c("#FF9D9A","#FFB10F",'gray90',"black","red"))+
+  ylab('-log10 (q-value)')+
+  xlab('log2 (FoldChange)')+
+  geom_text_repel(data = res1,aes(color = color,label = row),size = 4,
+                  max.overlaps = getOption("ggrepel.max.overlaps", default = 40),
+                  segment.color = "black", show.legend = FALSE)+
+  geom_vline(xintercept = c(-2,2),lty = 2, col = "black", lwd = 0.5)+
+  geom_hline(yintercept = -log10(0.05), lty = 2, col = "black", lwd = 0.5)+
+  theme_test()+theme(
+    axis.title=element_text(size = 15),
+    axis.text.x= element_text(size = 15,angle = 0),
+    axis.text.y= element_text(size = 15),
+    legend.position ="none",
+    strip.text = element_text(size = 15))
+
+##NP上调基因多为np_up_gene
+length(intersect(res$gene[res$group=="NP"],np_up_gene))
+
+
+idss <- mapIds(org.Hs.eg.db,
+               keys=setdiff(res$gene[res$group=="NP"],np_up_gene),#rownames(res)[res$group=="OP"],
+               column="ENTREZID",
+               keytype="SYMBOL",
+               multiVals="first")
+
+ego_OP_t1   <- enrichGO(gene= idss,
+                universe= names(geneList),
+                OrgDb= org.Hs.eg.db,
+                ont= "BP",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff = 0.05,
+                readable      = TRUE)
+
+View(ego_OP_t1@result[ego_OP_t1@result$p.adjust<0.05 ,])
+
+```
+
+
+###tpm for cibersort
+```{r}
+data=hrna_symbol[,rna_meta_lab1$Run[rna_meta_lab1$样本类型2!="Sputum" & rna_meta_lab1$姓名缩写 %in% op_t1_meta$姓名缩写]]
+#results
+cell_data=read.csv("CIBERSORTx_Job7_Results.csv")
+colnames(cell_data)[1]="Run"
+cell_data=cell_data[cell_data$P.value<0.25,]
+cell_data=left_join(cell_data,select(rna_meta_lab1,Run,time,样本类型2))
+table(cell_data[,c("time","样本类型2")])
+
+cell_data1=data.frame(Run=rep(cell_data$Run,22),cell_Porp=as.numeric(cell_data[,2:23] %>% as.matrix()) %>% as.vector(),
+                      cell=rep(colnames(cell_data)[2:23],each = nrow(cell_data)))
+cell_data1=left_join(cell_data1,select(rna_meta_lab1,Run,time,样本类型2))
+
+ggplot(cell_data1[cell_data1$time %in% c("1","2"),],aes(x = time,y=cell_Porp, fill = time)) +
+  geom_boxplot() +stat_compare_means(comparisons = list(c("1", "2")),
+                                     method = "wilcox.test")+
+  facet_wrap(~cell+样本类型2, scales = "free",nrow=4) +ylim(0,0.5)+
+  theme_test()
+
+##Macrophages.M1,T.cells.regulatory..Tregs.,T.cells.follicular.helper
+
+##FigureS4B，替换成上述其他细胞的名字就可以画其他细胞
+ggplot(cell_data1[cell_data1$time %in% c("1","2") & cell_data1$cell=="Macrophages.M1",],
+       aes(x = time,y=cell_Porp, fill = time)) +
+  scale_fill_manual(values = c("#FFB10F","#FFB10F","#FF9D9A","#FF9D9A"))+
+  geom_boxplot(width=0.5) +stat_compare_means(comparisons = list(c("1", "2")),
+                                     method = "wilcox.test")+
+  facet_wrap(~cell+样本类型2, scales = "fixed",nrow=1) +
+  theme_classic2()
+
+wilcox.test(cell_data1[cell_data1$time=="1" & cell_data1$cell=="Macrophages.M1" & cell_data1$样本类型2=="OP","cell_Porp"],
+            cell_data1[cell_data1$time=="1" & cell_data1$cell=="Macrophages.M1" & cell_data1$样本类型2=="NP","cell_Porp"])
+```
+
+###2，3针疫苗感染者的差异
+```{r}
+np_t2_meta=rna_meta_lab1[rna_meta_lab1$样本类型2=="NP" & rna_meta_lab1$time==2,]
+np_t2_meta=np_t2_meta[np_t2_meta$姓名缩写 %in% op_t1_meta$姓名缩写,]
+op_t2_meta=rna_meta_lab1[rna_meta_lab1$样本类型2=="OP" & rna_meta_lab1$time==2,]
+op_t2_meta=op_t2_meta[op_t2_meta$姓名缩写 %in% op_t1_meta$姓名缩写,]
+
+all(op_t1_meta$姓名缩写==np_t1_meta$姓名缩写)
+all(op_t2_meta$姓名缩写==np_t2_meta$姓名缩写)
+
+colData=data.frame(samples=np_t2_meta$Run,
+                   cluster=rep("NP",27),
+                   姓名缩写=np_t2_meta$姓名缩写)
+colData=left_join(colData,select(zr_individual_meta,姓名缩写,Num.of.vaccinations))
+colData$Num.of.vaccinations=factor(colData$Num.of.vaccinations,levels = c("2","3"))
+table(colData$Num.of.vaccinations)
+
+dds <- DESeqDataSetFromMatrix(countData = hrna_symbol[rownames(hrna_symbol.normalized_np),np_t2_meta$Run]+1, #t1_gene_viral_load_sig$genes
+                              colData = colData, 
+                              design = ~ Num.of.vaccinations)
+#dds@assays=dds@assays[t1_gene_viral_load_sig$genes,]
+dds = DESeq(dds) ## time consuming
+
+res <- results(dds, contrast = c("Num.of.vaccinations", "2", "3")) %>% as.data.frame()
+res$group="NS"
+res$group[res$log2FoldChange>2 & res$padj<0.05]="3"
+res$group[res$log2FoldChange < -2 & res$padj<0.05]="2"
+res$group=factor(res$group,levels = c("2","3","NS"))
+table(res$group)
+res$gene=rownames(res)
+#res$log2FoldChange= -res$log2FoldChange
+
+res_np_t2_vac=res
+
+
+##看功能
+idss <- mapIds(org.Hs.eg.db,
+               keys=res_np_t2_vac$gene[res_np_t2_vac$group=="2"],
+               column="ENTREZID",
+               keytype="SYMBOL",
+               multiVals="first")
+
+tmp   <- enrichGO(gene= idss,
+                universe= names(geneList),
+                OrgDb= org.Hs.eg.db,
+                ont= "BP",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff = 0.05,
+                readable      = TRUE)
+
+View(tmp@result[tmp@result$p.adjust<0.05 ,])
+
+
+```
+
+
+##OP差异上调基因在感染前后和病毒载量的关联
+```{r}
+plotdata1=hrna_symbol.normalized_op[intersect(ISG_list_new,rownames(hrna_symbol.normalized_op)),viral_response_op$Run_T1]
+plotdata1_viral_load=data.frame(genes=rownames(plotdata1),cor=NA,p=NA)
+for(i in 1:nrow(plotdata1_viral_load)){
+  test=cor.test(plotdata1[i,] %>% as.numeric(),viral_response_op$viral_load_t2,method = "spearman")
+  plotdata1_viral_load$cor[i]=test$estimate;plotdata1_viral_load$p[i]=test$p.value
+}
+plotdata1_viral_load$p.adj=p.adjust(plotdata1_viral_load$p,method = "fdr")
+
+plotdata2=hrna_symbol.normalized_op[intersect(ISG_list_new,rownames(hrna_symbol.normalized_op)),viral_response_op$Run_T2]
+plotdata2_viral_load=data.frame(genes=rownames(plotdata2),cor=NA,p=NA)
+for(i in 1:nrow(plotdata2_viral_load)){
+  test=cor.test(plotdata2[i,] %>% as.numeric(),viral_response_op$viral_load_t2,method = "spearman")
+  plotdata2_viral_load$cor[i]=test$estimate;plotdata2_viral_load$p[i]=test$p.value
+}
+plotdata2_viral_load$p.adj=p.adjust(plotdata2_viral_load$p,method = "fdr")
+
+plotdata1=data.frame(t1_cor=plotdata1_viral_load$cor,t2_cor=plotdata2_viral_load$cor)
+plotdata2=data.frame(t1_p=plotdata1_viral_load$p.adj,t2_p=plotdata2_viral_load$p.adj)
+rownames(plotdata1)=plotdata1_viral_load$genes
+
+pheatmap(plotdata1,
+         cluster_rows = F,cluster_cols = F,
+         color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(11),
+         breaks = c(-0.6,-0.5,-0.4,-0.3,-0.2,-0.1,0,0.1,0.2,0.3,0.4,0.5,0.6),
+         display_numbers = ifelse(plotdata2<0.05,"*",""),
+         number_color = "white",
+         name = "correlation"
+         )
+
+```
+
+
+
+

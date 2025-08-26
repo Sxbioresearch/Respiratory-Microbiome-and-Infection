@@ -1,0 +1,673 @@
+---
+title: "MOFA"
+author: "Jing Yang"
+date: "2025-01-23"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+## MOFA！
+
+```{r}
+# VST for host transcriptome & microbiome
+##intersect(union(immune_gene_all1,circ_OP$genes),rownames(hrna_symbol))
+op_t1_host=hrna_symbol[t1_gene_viral_load_sig$genes,
+                       op_meta$Run[op_meta$time==1 & op_meta$姓名缩写 %in% setdiff(t1_neg,"YZX")]]#,keepGene_op
+
+#op_t1_host=op_t1_ssgsea
+op_t1_micr=DNA_species_count[sig_taxa,op_meta$Run_DNA[op_meta$time==1 & op_meta$姓名缩写 %in% setdiff(t1_neg,"YZX")]]
+
+#colSums(op_t1_host);colSums(op_t1_micr)
+
+op_t1_host=op_t1_host[rowSums(op_t1_host)!=0,colSums(op_t1_host)!=0]
+op_t1_micr=op_t1_micr[rowSums(op_t1_micr)!=0,colSums(op_t1_micr)!=0]
+
+op_t1_meta=op_virus_meta[op_virus_meta$time==1 & op_virus_meta$姓名缩写 %in% setdiff(t1_neg,"YZX"),]
+rownames(op_t1_meta)=NULL
+op_t1_host=op_t1_host[,op_t1_meta$Run]
+all(colnames(op_t1_host)==op_t1_meta$Run)
+all(colnames(op_t1_micr)==op_t1_meta$Run_DNA)
+
+#library(DESeq2)
+dds=DESeq(DESeqDataSetFromMatrix(countData = (op_t1_host+1) %>% as.matrix(),
+colData = op_t1_meta,design = ~1))
+dds <- estimateSizeFactors(dds)
+vsd <- varianceStabilizingTransformation(dds, blind = TRUE)
+op_t1_host <- assay(vsd)
+#op_t1_host <- op_t1_host[intersect(union(immune_gene_all1,circ_OP$genes),rownames(op_t1_host)),]
+
+#op_t1_host=t(scale(t(op_t1_host)))
+
+##clr
+op_t1_micr=compositions::clr(t(op_t1_micr)+1) %>% t()
+
+
+## MOFA
+colnames(op_t1_host)=op_t1_meta$姓名缩写
+colnames(op_t1_micr)=op_t1_meta$姓名缩写
+
+# long df
+t1=op_t1_host %>% as.matrix();dim(t1)=c(nrow(op_t1_host)*ncol(op_t1_host),1)
+df1=data.frame(value=t1[,1],view="host",sample=rep(colnames(op_t1_host),each=nrow(op_t1_host)),feature=rep(rownames(op_t1_host),n=ncol(op_t1_host)))
+
+t1=op_t1_micr %>% as.matrix();dim(t1)=c(nrow(op_t1_micr)*ncol(op_t1_micr),1)
+df2=data.frame(value=t1[,1],view="microbiome",sample=rep(colnames(op_t1_micr),each=nrow(op_t1_micr)),feature=rep(rownames(op_t1_micr),n=ncol(op_t1_micr)))
+
+dt=rbind(df1,df2)
+MOFAobject <- create_mofa(dt)
+data_opts <- get_default_data_options(MOFAobject)
+model_opts <- get_default_model_options(MOFAobject)
+model_opts$num_factors=6
+train_opts <- get_default_training_options(MOFAobject)
+
+MOFAobject <- prepare_mofa(
+  object = MOFAobject,
+  data_options = data_opts,
+  model_options = model_opts,
+  training_options = train_opts
+)
+
+## run mofa
+#outfile = file.path(getwd(),"viral_gene_microbe_model_0209.hdf5")
+#model <- run_mofa(MOFAobject,outfile = outfile,use_basilisk = TRUE)
+#model <- load_model("F:/AAAA/Others/covid_urt_2024/202501_Summary/only_immune_model.hdf5")
+
+model <- load_model("viral_gene_microbe_model.hdf5")#F:/AAAA/Others/covid_urt_2024/model.hdf5
+
+set.seed(42)
+
+## Dimensionality reduction
+# umap <- run_umap(model, n_neighbors = 5, min_dist=0, 
+#                  n_components=2, negative_sample_rate=5, verbose=FALSE)
+umap_dim <- as.data.frame(umap@dim_red[["UMAP"]])
+umap_dim=umap_dim[order(umap_dim$UMAP2,decreasing = F),]
+
+umap_dim$cluster=c(rep("1",14),rep("2",13))
+op_t1_meta$Name=op_t1_meta$姓名缩写
+umap_dim=left_join(umap_dim,select(op_t1_meta,Name,Run_DNA,Run))
+
+
+tmp_df2=merge(umap_dim,aggregate(cbind(mean.x=UMAP1,mean.y=UMAP2)~cluster,umap_dim,mean),by="cluster")
+rownames(tmp_df2)=tmp_df2$sample
+tmp_df2=left_join(tmp_df2,select(viral_response_op,Name,viral_load_t2))
+
+ggplot(tmp_df2, aes(UMAP1,UMAP2,color=cluster))+
+  geom_point(size=2,alpha=0.9)+#aes(size = viral_load_t2)
+  geom_segment(aes(x=mean.x,y=mean.y,xend=UMAP1, yend=UMAP2),color="grey45",alpha=0.3)+
+  scale_color_jama()+
+  theme_bw()+ 
+  stat_ellipse(aes(fill = cluster),show.legend = F, geom="polygon",alpha=0.02,level = 0.90,type = "t",position = "identity")+
+  xlab(paste("PCoA1"," (",round(pcoa_eig[1]*100,1),"%",")",sep = ""))+theme(legend.position = "none")+
+  ylab(paste("PCoA2"," (",round(pcoa_eig[2]*100,1),"%",")",sep = ""))+scale_fill_aaas()+
+  ggrepel::geom_label_repel(data=unique(select(tmp_df2,mean.x,mean.y,cluster)),
+                            aes(mean.x,mean.y,color=cluster),
+                            label=c("1","2"),
+                            fontface="bold",show.legend = F,box.padding = 0,size=4)
+
+
+## identify ideal number of clusters based on UMAP dimensions
+library(factoextra)
+fviz_nbclust(umap_dim[,c(2,3)], kmeans, method = "wss") ### Elbow method:
+fviz_nbclust(umap_dim[,c(2,3)], kmeans, method = "silhouette") ### Silhouette method
+gap_stat <- cluster::clusGap(umap_dim[,c(2,3)], FUN = kmeans, nstart = 2, K.max = 10, B = 500)
+fviz_gap_stat(gap_stat)
+
+```
+
+
+
+
+```{r}
+
+op_t1_micr=DNA_species_count[sig_taxa,op_t1_meta$Run_DNA]
+op_t1_micr=compositions::clr(t(op_t1_micr)+1) %>% t()
+#op_t1_micr=apply(op_t1_micr,2,function(x){x/sum(x)})
+colnames(op_t1_micr)=op_t1_meta$姓名缩写
+
+
+op_t1_host=hrna_symbol.normalized_op_immue[t1_gene_viral_load_sig$genes,
+                       op_meta$Run[op_meta$time==1 & op_meta$姓名缩写 %in% setdiff(t1_neg,"YZX")]]
+
+all(colnames(op_t1_host)==op_t1_meta$Run)
+colnames(op_t1_host)=op_t1_meta$姓名缩写
+
+# distance=vegdist(t(op_t1_micr),method = "euclidean")
+# pcoa <- cmdscale(distance, k = 2, eig = TRUE)
+# pcoa_eig <- (pcoa$eig)[1:2] / sum(pcoa$eig)
+# tmp_df <- pcoa$points[,1:2] %>% as.data.frame()
+
+set.seed("1234")
+
+tmp_df=umap::umap(t(op_t1_host) %>% as.matrix(),n_neighbors = 5, min_dist=0.4, 
+                 n_components=2, negative_sample_rate=5, verbose=FALSE)
+tmp_df=tmp_df$layout
+
+colnames(tmp_df) <-  c('PCoA1', 'PCoA2')
+tmp_df=as.data.frame(tmp_df)
+
+
+tmp_df1 <- tmp_df %>% rownames_to_column("Name") %>% right_join(umap_dim,.) %>% as.data.frame()
+
+tmp_df2=merge(tmp_df1,aggregate(cbind(mean.x=PCoA1,mean.y=PCoA2)~cluster,tmp_df1,mean),by="cluster")
+rownames(tmp_df2)=tmp_df2$Name
+tmp_df2=left_join(tmp_df2,select(viral_response_op,Name,viral_load_t2))
+
+ggplot(tmp_df2, aes(PCoA1,PCoA2,color=cluster))+
+  geom_point(size=3,alpha=0.9)+
+  geom_segment(aes(x=mean.x,y=mean.y,xend=PCoA1, yend=PCoA2),color="grey45",alpha=0.3)+
+  scale_color_jama()+
+  theme_bw()+ 
+  stat_ellipse(aes(fill = cluster),show.legend = F, geom="polygon",alpha=0.02,level = 0.90,type = "t",position = "identity")+
+  xlab("UMAP1")+theme(legend.position = "none")+
+  ylab("UMAP2")+
+  ggrepel::geom_label_repel(data=unique(select(tmp_df2,mean.x,mean.y,cluster)),
+                            aes(mean.x,mean.y,color=cluster),
+                            label=c("1","2"),
+                            fontface="bold",show.legend = F,box.padding = 0,size=4)
+
+
+op_t1_micr=op_dna_species[sig_taxa,op_t1_meta$Run_DNA]
+colnames(op_t1_micr)=op_t1_meta$姓名缩写
+diff_taxa=data.frame(taxa=rownames(op_t1_micr),fc=NA,p=NA)
+for(i in 1:35){
+  test=wilcox.test(op_t1_micr[i,factors_raw$Name[factors_raw$cluster=="1"]] %>% as.numeric(),
+                   op_t1_micr[i,factors_raw$Name[factors_raw$cluster=="2"]] %>% as.numeric())
+  diff_taxa$p[i]=test$p.value
+  diff_taxa$fc[i]=log2(mean(op_t1_micr[i,factors_raw$Name[factors_raw$cluster=="1"]] %>% as.numeric()+0.001)/mean(op_t1_micr[i,factors_raw$Name[factors_raw$cluster=="2"]] %>% as.numeric()+0.001))
+}
+
+diff_taxa$p.adj=p.adjust(diff_taxa$p,method = "fdr") %>% round(.,digits = 2)
+diff_taxa=diff_taxa[diff_taxa$p.adj <= 0.05,]
+diff_taxa=diff_taxa[order(diff_taxa$fc,decreasing = T),]
+diff_taxa$taxa=factor(diff_taxa$taxa,levels = diff_taxa$taxa)
+diff_taxa$cluster=ifelse(diff_taxa$fc<0,"2","1")
+
+ggplot()+geom_bar(data=diff_taxa,aes(x=taxa,y=fc,fill=cluster),stat="identity")+
+  theme(axis.text.x = element_text(angle = 0, hjust = 1), 
+        axis.ticks.x = element_blank(), plot.margin = unit(c(0, 0, 0, 0), "cm"))+coord_flip()+
+  theme_test()+
+  scale_fill_jama()+ylab("Log2FoldChangee(C1/C2)")+xlab("")
+
+
+###diff_go_ssgsea
+op_t1_ssgsea=op_t1_ssgsea[,op_t1_meta$Run]
+colnames(op_t1_ssgsea)=op_t1_meta$姓名缩写
+diff_go=data.frame(taxa=rownames(op_t1_ssgsea),fc=NA,p=NA)
+for(i in 1:52){
+  test=wilcox.test(op_t1_ssgsea[i,factors_raw$Name[factors_raw$cluster=="1"]] %>% as.numeric(),
+                   op_t1_ssgsea[i,factors_raw$Name[factors_raw$cluster=="2"]] %>% as.numeric())
+  diff_go$p[i]=test$p.value
+  diff_go$fc[i]=log2(mean(op_t1_ssgsea[i,factors_raw$Name[factors_raw$cluster=="1"]] %>% as.numeric()+0.001)/mean(op_t1_ssgsea[i,factors_raw$Name[factors_raw$cluster=="2"]] %>% as.numeric()+0.001))
+}
+
+diff_go$p.adj=p.adjust(diff_go$p,method = "fdr") %>% round(.,digits = 2)
+diff_go=diff_go[diff_go$p.adj <= 0.05,]
+diff_go=diff_go[order(diff_go$fc,decreasing = T),]
+diff_go$taxa=factor(diff_go$taxa,levels = diff_go$taxa)
+diff_go$cluster=ifelse(diff_go$fc<0,"2","1")
+
+ggplot()+geom_bar(data=diff_go,aes(x=taxa,y=fc,fill=cluster),stat="identity")+
+  theme(axis.text.x = element_text(angle = 0, hjust = 1), 
+        axis.ticks.x = element_blank(), plot.margin = unit(c(0, 0, 0, 0), "cm"))+coord_flip()+
+  theme_test()+
+  scale_fill_manual(values = c("#DF8F44FF"))+ylab("Log2FoldChange(C1/C2)")+xlab("")
+
+all(op_t1_meta$姓名缩写==factors_raw$Name)
+factors_raw$cluster=factor(factors_raw$cluster,levels = c("1","2"))
+dds <- DESeqDataSetFromMatrix(countData = hrna_symbol[t1_gene_viral_load_sig$genes,op_t1_meta$Run]+1, ##rownames(hrna_symbol.normalized_op_immue)
+                              colData = factors_raw, 
+                              design = ~ cluster)#+Age+Gender+BMI 
+#dds@assays=dds@assays[t1_gene_viral_load_sig$genes,]
+dds = DESeq(dds) ## time consuming
+
+res <- results(dds,contrast = c("cluster", "2", "1")) %>% as.data.frame()
+res$group="NS"
+res$group[res$log2FoldChange>2 & res$padj<0.05]="2"
+res$group[res$log2FoldChange < -2 & res$padj<0.05]="1"
+
+res$group=factor(res$group,levels = c("1","2","NS"))
+table(res$group)
+res$log2FoldChange= -res$log2FoldChange
+
+
+res1=res[res$padj<0.05,]
+res1$tmp=abs(res1$log2FoldChange)
+res1=res1[order(res1$tmp,decreasing = T),]
+res1$row=rownames(res1)
+
+ggplot(res, aes(x = log2FoldChange, y = -log10(padj), colour = group))+
+  geom_point()+scale_color_manual(values=c('#374E55','#DF8F44','gray90'))+
+  ylab('-log10 (q-value)')+
+  xlab('log2 (FoldChange)')+
+  geom_text_repel(data = res1[1:10,],aes(label = row),size = 4,
+                  color = "black",max.overlaps = getOption("ggrepel.max.overlaps", default = 40),
+                  segment.color = "black", show.legend = FALSE)+
+  geom_vline(xintercept = c(-2,2),lty = 2, col = "black", lwd = 0.5)+
+  geom_hline(yintercept = -log10(0.05), lty = 2, col = "black", lwd = 0.5)+
+  theme_test()+theme(
+    axis.title=element_text(size = 15),
+    axis.text.x= element_text(size = 15,angle = 0),
+    axis.text.y= element_text(size = 15),
+    legend.position ="none",
+    strip.text = element_text(size = 15))
+
+rownames(res)[res$group=="1"]
+
+idss <- mapIds(org.Hs.eg.db,
+               keys=rownames(res)[res$group=="2"],
+               column="ENTREZID",
+               keytype="SYMBOL",
+               multiVals="first")
+
+ego_top_c2   <- enrichGO(gene= idss,
+                universe= names(geneList),
+                OrgDb= org.Hs.eg.db,
+                ont= "BP",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff = 0.05,
+                readable      = TRUE)
+
+#ego_top_c2@result=ego_top_c2@result[ ego_top_c2@result$Count>=10 ,]
+View(ego_top_c1@result[ego_top_c1@result$p.adjust<0.05,])
+View(ego_top_c2@result[ego_top_c2@result$p.adjust<0.05,])
+
+length(intersect(ego_top_c2@result$Description[ego_top_c2@result$p.adjust<0.05],names(op_t1_proviral_go)))
+
+
+ego_top_c2@result=ego_top_c2@result[ego_top_c2@result$p.adjust<0.05  & ego_top_c2@result$Count>=10,]
+View(ego_top_c2@result)
+
+
+```
+
+```{r}
+plot_variance_explained(model, x="group", y="factor", plot_total = T)[[2]]
+plot_variance_explained(model, x="view", y="factor")
+
+factor_var=model@cache$variance_explained$r2_per_factor[[1]]
+
+plot_factor_cor(model)
+
+plot_weights(model,view = "host",factor = 1,
+             nfeatures = 30,scale = T,abs = F,
+             text_size = 3)
+
+plot_weights(model,view = "microbiome",factor = 1,
+             nfeatures = 20,scale = T,abs = F,
+             text_size = 3)
+
+plot_top_weights(model,view = "microbiome",factor = 1,nfeatures = 20,sign = "all")
+plot_top_weights(model,view = "microbiome",factor = 1,nfeatures = 30,sign = "negative")
+
+tmp=plot_top_weights(model,view = "host",factor = 1,nfeatures = 40,sign = "all")
+plot_top_weights(model,view = "host",factor = 1,nfeatures = 20,sign = "negative")
+
+library(MOFAdata)
+data(MSigDB_v6.0_C5_human)
+tt=data.frame(ensg=colnames(MSigDB_v6.0_C5_human))
+tt$symbol=mapIds(org.Hs.eg.db,keys=colnames(MSigDB_v6.0_C5_human),column="SYMBOL",keytype="ENSEMBL",multiVals="first")
+tt=tt[!is.na(tt$symbol),]
+MSigDB_v6.0_C5_human=MSigDB_v6.0_C5_human[,tt$ensg]
+colnames(MSigDB_v6.0_C5_human)=tt$symbol
+
+res.positive <- run_enrichment(model, 
+  feature.sets = MSigDB_v6.0_C5_human, 
+  view = "host",
+  sign = "positive",
+  alpha = 0.05
+)
+
+res.negative <- run_enrichment(model, 
+  feature.sets = MSigDB_v6.0_C5_human, 
+  view = "host",
+  sign = "negative",
+  alpha = 0.05
+)
+
+plot_enrichment_heatmap(res.positive)
+plot_enrichment_heatmap(res.negative)
+
+tmp=plot_enrichment(res.positive, factor = 1, max.pathways = 200,alpha = 1)
+View(tmp$data)
+
+tmp=plot_enrichment(res.negative, factor = 4, max.pathways = 200,alpha = 0.05)
+
+tmp1=plot_enrichment(res.negative, factor = 2, max.pathways = 30,alpha = 0.1)
+tmp1$data$factor="Factor2-"
+
+tmp$data=rbind(tmp$data,tmp1$data)
+tmp$data$factor=factor(tmp$data$factor,levels=c("Factor2+","Factor2-"))
+ggplot(tmp$data, aes(x = logp, y = pathway)) +
+  geom_segment(aes(x = 0, xend = logp, y = pathway, yend =pathway), color = "black") +
+  geom_point(size = 4, color = "black") +
+  labs(x = "-log10(p-value)",y="") +xlim(0,2)+
+  theme_bw()+facet_wrap(.~factor,nrow = 2,scales = "free_y")
+
+factors <- get_factors(model, factors = "all", as.data.frame = T)
+names(factors)[1]="Name"
+factors=left_join(factors,viral_response_op)
+
+## total correlation at once ##
+factors_immune=data.frame(matrix(NA,nrow = 6,ncol = 15))
+rownames(factors_immune)=unique(factors$factor)
+colnames(factors_immune)=colnames(factors)[78:92]
+
+factors_immune_p=factors_immune
+
+tmp=factors[factors$viral_load_t2!=0,]
+for(i in 1:nrow(factors_immune)){
+  for(j in 1:ncol(factors_immune)){
+    test=cor.test(tmp[tmp$factor==rownames(factors_immune)[i],colnames(factors_immune)[j]],
+                  tmp[tmp$factor==rownames(factors_immune)[i],"value"],
+                  method = "pearson")
+    factors_immune[i,j]=test$estimate;factors_immune_p[i,j]=test$p.value
+  }
+}
+
+
+factors_immune=factors_immune[,!is.na(factors_immune[1,])]
+factors_immune_p=factors_immune_p[,colnames(factors_immune)]
+
+
+
+library(reshape2)
+
+corr_data <- factors_immune %>% as.matrix()
+dim(corr_data)=c(nrow(factors_immune)*ncol(factors_immune),1)
+corr_data=as.data.frame(corr_data)
+corr_data$factors=rep(rownames(factors_immune),n=ncol(factors_immune))
+corr_data$immune=rep(colnames(factors_immune),each=nrow(factors_immune))
+
+pval_data <- factors_immune_p %>% as.matrix()
+dim(pval_data)=c(nrow(factors_immune)*ncol(factors_immune),1)
+pval_data=as.data.frame(pval_data)
+pval_data$factors=rep(rownames(factors_immune),n=ncol(factors_immune))
+pval_data$immune=rep(colnames(factors_immune),each=nrow(factors_immune))
+
+
+names(corr_data) <- c("Correlation","Row", "Column")
+names(pval_data) <- c("PValue","Row", "Column")
+
+combined_data <- merge(corr_data, pval_data, by = c("Row", "Column"))
+
+combined_data$p.adj=p.adjust(combined_data$PValue,method = "fdr")
+combined_data$Significance <- ifelse(combined_data$PValue < 0.01, "**",ifelse((combined_data$PValue>0.01 & combined_data$PValue<0.05),"*",ifelse((combined_data$PValue>0.05 & combined_data$PValue<0.1),".","")))
+
+combined_data$Column = factor(combined_data$Column,levels= rev(colnames(factors_immune)))
+
+ggplot(combined_data , aes(x = Row, y = Column)) +
+  geom_tile(aes(fill = Correlation), color = "white") +  #
+  scale_fill_gradient2(low = "#0173AE", mid = "white", high = "#d73027", midpoint = 0) +  
+  geom_text(aes(label = Significance), color = "black", size = 5) +  
+  theme_void() +
+  theme(
+    axis.text.x = element_text(size = 10,angle = 90),
+    axis.text.y = element_text(size = 10,angle = 0)
+  ) +
+  labs(x="Baseline MOFA factors",y="",fill = "Correlation")
+
+id=read.table("sx_micro_data/symptom/ID.txt",sep = "\t",header = T)
+baseline1=read.csv("sx_micro_data/symptom/baseline1.csv")
+baseline2=read.csv("sx_micro_data/symptom/phenotype_remain.csv")
+baseline=left_join(id,baseline1) %>% left_join(.,baseline2)
+apply(baseline[,3:23],2, table)
+
+names(baseline)[1]="Name"
+factors1=left_join(factors[,1:3],baseline)
+
+factors_baseline=data.frame(matrix(NA,nrow = 6,ncol = 21))
+rownames(factors_baseline)=unique(factors$factor)
+colnames(factors_baseline)=colnames(baseline)[3:23]
+
+factors_baseline_p=factors_baseline
+
+for(i in 1:nrow(factors_baseline)){
+  for(j in 1:ncol(factors_baseline)){
+    test=cor.test(factors1[factors1$factor==rownames(factors_baseline)[i],colnames(factors_baseline)[j]],
+                  factors1[factors1$factor==rownames(factors_baseline)[i],"value"],method = "spearman")
+    factors_baseline[i,j]=test$estimate;factors_baseline_p[i,j]=test$p.value
+  }
+}
+
+
+factors_baseline=factors_baseline[,!is.na(factors_baseline[1,])]
+factors_baseline=factors_baseline[,c(setdiff(colnames(factors_baseline),
+                                             c("only_primary_vaccination","boosted_vaccination","number_of_vaccination")),
+                                     c("only_primary_vaccination","boosted_vaccination","number_of_vaccination"))]
+factors_baseline_p=factors_baseline_p[,colnames(factors_baseline)]
+
+
+
+library(reshape2)
+
+corr_data <- factors_baseline %>% as.matrix()
+dim(corr_data)=c(nrow(factors_baseline)*ncol(factors_baseline),1)
+corr_data=as.data.frame(corr_data)
+corr_data$factors=rep(rownames(factors_baseline),n=ncol(factors_baseline))
+corr_data$sym=rep(colnames(factors_baseline),each=nrow(factors_baseline))
+
+pval_data <- factors_baseline_p %>% as.matrix()
+dim(pval_data)=c(nrow(factors_baseline)*ncol(factors_baseline),1)
+pval_data=as.data.frame(pval_data)
+pval_data$factors=rep(rownames(factors_baseline),n=ncol(factors_baseline))
+pval_data$sym=rep(colnames(factors_baseline),each=nrow(factors_baseline))
+
+
+names(corr_data) <- c("Correlation","Row", "Column")
+names(pval_data) <- c("PValue","Row", "Column")
+combined_data <- merge(corr_data, pval_data, by = c("Row", "Column"))
+
+
+combined_data$Significance <- ifelse(combined_data$PValue < 0.1, "*", "")
+combined_data$Column = gsub("_"," ",combined_data$Column)
+
+combined_data$Column = factor(combined_data$Column,levels= gsub("_"," ",colnames(factors_baseline)))
+
+ggplot(combined_data, aes(x = Column, y = Row)) +
+  geom_tile(aes(fill = Correlation), color = "white") +  
+  scale_fill_gradient2(low = "#0173AE", mid = "white", high = "#d73027", midpoint = 0) +  
+  geom_text(aes(label = Significance), color = "black", size = 5) +  
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 10)
+  ) +
+  labs(x="Symptoms",y="MOFA factors",fill = "Correlation")
+
+```
+
+
+## Viral load prediction (baseline microbiome/host/host-micorbe)
+
+```{r}
+table(viral_response_op$viral_load_t2_psedo1==0)
+viral_response_op$viral_group=ifelse(viral_response_op$viral_load_t2_psedo1==0,0,1)
+viral_response_op$viral_group1=ifelse(viral_response_op$viral_load_t2<median(viral_response_op$viral_load_t2),0,1)
+viral_response_op=viral_response_op[order(viral_response_op$Name),]
+#write.csv(viral_response_op[,c("Name","viral_group")],"F:/AAAA/Others/covid_urt_2024/202501_Summary/covid_op_viral_load.csv",quote = F)
+
+factors <- get_factors(model, factors = "all", as.data.frame = T)
+factors=factors[order(factors$sample),]
+all(viral_response_op$Name==factors$sample[factors$factor=="Factor1"])
+
+mofa=data.frame(samples=factors$Name[factors$factor=="Factor1"],
+               fac1=factors$value[factors$factor=="Factor1"],
+               fac2=factors$value[factors$factor=="Factor2"],
+               fac3=factors$value[factors$factor=="Factor3"],
+               fac4=factors$value[factors$factor=="Factor4"],
+               fac5=factors$value[factors$factor=="Factor5"],
+               fac6=factors$value[factors$factor=="Factor6"])
+
+#write.csv(t(tmp),"F:/AAAA/Others/covid_urt_2024/202501_Summary/covid_op_factors.csv",quote = F,row.names = F)
+ 
+## microbial features
+op_meta=op_meta[order(op_meta$姓名缩写),]
+tmp=op_dna_species[sig_taxa,op_meta$Run_DNA[op_meta$time==1 & op_meta$姓名缩写 %in% factors$Name]]
+rownames(op_meta)=op_meta$Run_DNA
+colnames(tmp)=op_meta[colnames(tmp),"姓名缩写"]
+all(colnames(tmp)==viral_response_op$Name)
+
+## host features
+tmp1=hrna_symbol.normalized_op[intersect(t1_gene_viral_load_sig$genes,rownames(hrna_symbol.normalized_op)),
+                              op_meta$Run[op_meta$time==1 & op_meta$姓名缩写 %in% factors$Name]]
+rownames(op_meta)=op_meta$Run
+colnames(tmp1)=op_meta[colnames(tmp1),"姓名缩写"]
+all(colnames(tmp1)==viral_response_op$Name)
+
+all(mofa$Name==viral_response_op$Name)
+
+library(randomForest)
+library(caret)
+
+set.seed(123) 
+#1.
+X <- mofa[,-1]#MOFA 
+X <- scale(X,center = T)#MOFA
+
+#2. tmp 是微生物，tmp1是host
+X <- rbind(tmp1,tmp) %>% t()#host microbiome
+
+y <- as.factor(viral_response_op$viral_group1) 
+
+n <- nrow(X)
+predicted_probs <- numeric(n)
+
+for (i in 1:n) {
+  train_index <- setdiff(1:n, i)
+  test_index <- i
+  X_train <- X[train_index, ]
+  y_train <- y[train_index]
+  X_test <- X[test_index, , drop = FALSE]
+  rf_model <- randomForest(x = X_train, y = as.factor(y_train), ntree = 100,importance = T)
+  importance_scores <- importance(rf_model)
+  predicted_probs[test_index] <- stats::predict(rf_model, X_test, type = "prob")[, 2]
+}
+predicted_probs=data.frame(label=viral_response_op$viral_group,predicted_probs=predicted_probs)
+
+## ROC
+library(ROCit)
+roc2 <- rocit(score = predicted_probs$predicted_probs,class=predicted_probs$label)
+ci_auc <- ciAUC(roc2)
+ci_auc
+
+
+auc_value2 <- ci_auc$AUC
+ci_lower2 <- ci_auc$lower
+ci_upper2 <- ci_auc$upper
+
+boot_ci <- ciROC(roc2, level = 0.95, nboot = 500)
+
+roc_df2 <- data.frame(
+  FPR = roc2$FPR,
+  TPR = roc2$TPR,
+  TPR_lower = boot_ci$LowerTPR,
+  TPR_upper = boot_ci$UpperTPR
+)
+
+
+ggplot() +
+  geom_ribbon(data = roc_df1, aes(x = FPR, ymin = TPR_lower, ymax = TPR_upper), fill = color1_fill, alpha = 0.06) +
+  geom_line(data = roc_df1, aes(x = FPR, y = TPR), color = color1_line, size = 1,alpha=0.7) +
+  geom_ribbon(data = roc_df2, aes(x = FPR, ymin = TPR_lower, ymax = TPR_upper), fill = color2_fill, alpha = 0.06) +
+  geom_line(data = roc_df2, aes(x = FPR, y = TPR), color = color2_line, size = 1,alpha=0.7) +
+  geom_ribbon(data = roc_df3, aes(x = FPR, ymin = TPR_lower, ymax = TPR_upper), fill = color3_fill, alpha = 0.06) +
+  geom_line(data = roc_df3, aes(x = FPR, y = TPR), color = color3_line, size = 1,alpha=0.7) +
+  geom_ribbon(data = roc_df4, aes(x = FPR, ymin = TPR_lower, ymax = TPR_upper), fill = color4_fill, alpha = 0.06) +
+  geom_line(data = roc_df4, aes(x = FPR, y = TPR), color = color4_line, size = 1,alpha=0.7) +
+  labs(x = "1 - Specificity (False Positive Rate)", 
+       y = "Sensitivity (True Positive Rate)") +
+  theme_test()+
+  annotate("text", x = 0.3, y = 0.7, 
+           label = sprintf("Host+Microbiome (MOFA)\nAUC = %.3f (%.3f - %.3f)", auc_value2, ci_lower2, ci_upper2), 
+           size = 5, color = color2_line, hjust = 0) +
+  annotate("text", x = 0.3, y = 0.55, 
+           label = sprintf("Host+Microbiome (direct input)\nAUC = %.3f (%.3f - %.3f)", auc_value4, ci_lower4, ci_upper4), 
+           size = 5, color = color4_line, hjust = 0)+
+  annotate("text", x = 0.3, y = 0.4, 
+           label = sprintf("Host\nAUC = %.3f (%.3f - %.3f)", auc_value3, ci_lower3, ci_upper3), 
+           size = 5, color = color3_line, hjust = 0)+
+  annotate("text", x = 0.3, y = 0.25, 
+           label = sprintf("Microbiome\nAUC = %.3f (%.3f - %.3f)", auc_value1, ci_lower1, ci_upper1), 
+           size = 5, color = color1_line, hjust = 0)
+
+
+```
+
+## T1 MOFA & T2 immune response determinated the disruption of URT microbiome and host symtoms
+
+```{r}
+factors <- get_factors(model, factors = "all", as.data.frame = T)
+factors_raw=data.frame(samples=factors$sample[factors$factor=="Factor1"],
+               fac1=factors$value[factors$factor=="Factor1"],
+               fac2=factors$value[factors$factor=="Factor2"],
+               fac3=factors$value[factors$factor=="Factor3"],
+               fac4=factors$value[factors$factor=="Factor4"],
+               fac5=factors$value[factors$factor=="Factor5"],
+               fac6=factors$value[factors$factor=="Factor6"])
+
+rownames(op_virus_meta)=op_virus_meta$Run_DNA
+dist_groups=vegdist(op_dna_species %>% t(),method = "bray") %>% as.matrix() %>% flattenCorrMatrix1() %>% as.data.frame()
+dist_groups$t1=op_virus_meta[dist_groups$row,"time"]
+dist_groups$t2=op_virus_meta[dist_groups$column,"time"]
+dist_groups$n1=op_virus_meta[dist_groups$row,"姓名缩写"]
+dist_groups$n2=op_virus_meta[dist_groups$column,"姓名缩写"]
+dist_groups=dist_groups[dist_groups$n1==dist_groups$n2,]
+dist_groups$group=apply(dist_groups,1,function(x){paste(min(x[4],x[5]),max(x[4],x[5]),sep = "_")}) %>% unlist()
+table(dist_groups$group)
+
+dist_groups=dist_groups[dist_groups$n1 %in% setdiff(t1_neg,"YZX") & 
+                          dist_groups$n2 %in% setdiff(t1_neg,"YZX"),]
+
+dist_groups=dist_groups[dist_groups$group %in% c("1_1","1_2","1_3","1_4"),]
+table(dist_groups$group)
+
+
+all(factors_raw$samples==dist_groups$n1[dist_groups$group=="1_4"])
+rownames(factors_raw)=factors_raw$samples
+factors_raw$`T2-T1`=dist_groups$dist[dist_groups$group=="1_2"]
+factors_raw$`T3-T1`=NA
+factors_raw[dist_groups$n1[dist_groups$group=="1_3"],"T3-T1"]=dist_groups$dist[dist_groups$group=="1_3"]
+factors_raw$`T4-T1`=dist_groups$dist[dist_groups$group=="1_4"]
+
+cor.test(factors_raw$fac2,factors_raw$`T3-T1`)
+names(factors_raw)[1]="Name"
+
+factors_raw=left_join(factors_raw,viral_response_op[c(1,75:91)])
+cor.test(factors_raw$viral_load_t2_psedo1,factors_raw$`T4-T1`,method = "spearman")
+
+#tmp$data=tmp$data[order(tmp$data$x,decreasing = T),]
+names(umap_dim)[1]="Name"
+factors_raw=left_join(factors_raw,dplyr::select(umap_dim,Name,cluster))
+
+ggplot(factors_raw,aes(x=cluster,y=`viral_load_t2`))+
+  #geom_violin(aes(color=cluster),width=0.8,outlier.shape = NA,trim = FALSE)+
+  geom_boxplot(aes(color=cluster),width=0.3,outlier.shape = NA,alpha=0.5)+
+  geom_point(aes(color=cluster),size=0.7,position = position_dodge2(width = 0.5))+#size=viral_load_t2,#shape=1,
+  labs(y="Log10 viral load",x="")+
+  stat_compare_means(comparisons = list(c("1","2")),method = "wilcox.test")+
+  theme_bw()+
+  scale_color_jama()+
+  theme(axis.title = element_text(size = 12),
+        axis.text = element_text(size = 12),
+        axis.ticks.y = element_blank(),
+        legend.text = element_text(size = 8),
+        legend.position = "right")
+
+ggplot(factors_raw,aes(x=cluster,y=`T4-T1`))+
+  geom_boxplot(aes(color=cluster),width=0.5,outlier.shape = NA)+
+  geom_point(aes(color=cluster),shape=1)+#size=viral_load_t2,
+  labs(y="Distance between T4 and T1",x="")+
+  stat_compare_means(comparisons = list(c("1","2")),method = "wilcox.test")+
+  theme_bw()+
+  scale_color_jama()+
+  theme(axis.title = element_text(size = 12),
+        axis.text = element_text(size = 12),
+        axis.ticks.y = element_blank(),
+        legend.text = element_text(size = 8),
+        legend.position = "right")
+
+
+```
+

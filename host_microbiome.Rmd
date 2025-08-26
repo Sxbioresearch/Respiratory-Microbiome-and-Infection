@@ -1,0 +1,819 @@
+---
+title: "host_microbiome"
+author: "Jing Yang"
+date: "2024-11-07"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+## data preparing
+
+```{r}
+setwd("F:/AAAA/Others/covid_urt_2024")
+##Host RNA-seq normalization
+total_counts <- colSums(hrna_symbol)
+hrna_symbol.normalized <- log2(sweep(hrna_symbol,2,total_counts, FUN = "/") * 1e6+1)
+
+op_virus_meta=rna_meta_lab1[rna_meta_lab1$样本类型2=="OP",]
+dna_meta=read.csv("lab_dna_meta0512.csv")
+tmp=dna_meta[,1:2]
+names(tmp)[1]="Run_DNA"
+op_virus_meta=left_join(op_virus_meta,tmp)
+op_abs=read.csv("sx_micro_data/data_absolute.csv",row.names = 1)
+op_abs$Run_DNA=rownames(op_abs)
+op_virus_meta=left_join(op_virus_meta,op_abs[,c("Run_DNA","absolute_normal")])
+op_virus_meta$absolute_normal[op_virus_meta$absolute_normal==0]=0.01
+
+###immune gene lists
+###immune related genes###
+library(GSEABase)
+# Immune genes from ImmPort 
+gmt_file <- "F:/AAAA/Others/covid_urt_2024/gene_cate/all_gene_lists.gmt"
+gene_sets <- getGmt(gmt_file)
+gene_list <- geneIds(gene_sets)
+immune_gene= gene_list %>% unlist %>% unique
+
+## IRIS ImmPort
+immune_gene1=read.csv("F:/AAAA/Others/covid_urt_2024/gene_cate/iris.csv")
+immune_gene_all1=union(immune_gene1$name,immune_gene) %>% unique()
+
+############################
+## OP species counts ##
+
+DNA_species_count=read.csv("sx_micro_data/dna_S_all.csv",row.names = 1)
+
+RNA_species_count=read.csv("sx_micro_data/rna_S.csv",row.names = 1)
+RNA_species_count=RNA_species_count[,colnames(RNA_species_count)!="R15"]
+##R15
+tmp=read.csv("sx_micro_data/R15_new.csv",row.names = 1)
+names(tmp)="R15"
+RNA_species_count$taxa=rownames(RNA_species_count);tmp$taxa=rownames(tmp)
+RNA_species_count=full_join(RNA_species_count,tmp)
+RNA_species_count[is.na(RNA_species_count)]=0
+rownames(RNA_species_count)=RNA_species_count$taxa
+RNA_species_count$taxa <- NULL
+rm(tmp)
+
+###### RNA
+op_rna_species=read.csv("sx_micro_data/RNA_species_OP_relative_filter_new.csv",row.names = 1)
+op_rna_species=op_rna_species[,intersect(op_virus_meta$seqID,colnames(op_rna_species))]
+op_rna_species=op_rna_species[rownames(op_rna_species)!="g__Betacoronavirus|s__Severe acute respiratory syndrome-related coronavirus",] %>% apply(.,2,function(x){x/sum(x)})
+
+#DNA
+op_dna_species=read.csv("sx_micro_data/DNA_species_OP_relative_filter.csv",row.names = 1)
+op_dna_species=op_dna_species[,op_virus_meta$Run_DNA]
+
+tmp=intersect(rownames(op_rna_species),rownames(op_dna_species))
+tmp_rna_virus=grep("virus",setdiff(rownames(op_rna_species),
+                                   rownames(op_dna_species)),
+                   value = T,ignore.case = T)
+op_dna_species=op_dna_species[tmp,] %>% apply(.,2,function(x){x/sum(x)})
+op_rna_species=op_rna_species[c(tmp,"g__Enterovirus|s__Rhinovirus A"),] %>% 
+  apply(.,2,function(x){x/sum(x)})
+
+## metadata
+zr_baseline_meta=read_excel("gene_cate/zr_baseline_meta.xlsx")
+zr_acute_meta=read_excel("gene_cate/zr_acute_meta.xlsx")
+zr3=read_excel("中日/zr3.xlsx")
+
+zr_individual_meta=full_join(zr_baseline_meta,zr_acute_meta)
+tmp=rna_meta_lab1[rna_meta_lab1$time==2 & rna_meta_lab1$样本类型2=="OP",] %>% .[,c("志愿者姓名","姓名缩写","normlized_viral_load","normalized_ct")]
+names(tmp)[1]="Name"
+zr_individual_meta=left_join(tmp,zr_individual_meta)
+zr_individual_meta=zr_individual_meta[!duplicated(zr_individual_meta),]
+rownames(zr_individual_meta)=zr_individual_meta$姓名缩写
+zr_individual_meta=zr_individual_meta[,c(1,2,10,3:9,11:40)]
+zr_individual_meta$log10_normalized_viral_load=log10(zr_individual_meta$normlized_viral_load+1)
+
+zr_individual_meta=left_join(zr_individual_meta,zr3)
+zr_individual_meta$BMI=as.numeric(zr_individual_meta$Weight)/((as.numeric(zr_individual_meta$Height)/100)^2)
+zr_individual_meta=zr_individual_meta[!duplicated(zr_individual_meta),]
+rownames(zr_individual_meta)=zr_individual_meta$姓名缩写
+
+zr_individual_meta$Gender=ifelse(zr_individual_meta$Gender=="Female",1,0)
+zr_individual_meta$Gender=as.factor(zr_individual_meta$Gender)
+zr_individual_meta$Age=as.numeric(zr_individual_meta$Age)
+
+rm(zr_baseline_meta,zr_acute_meta,zr3)
+```
+
+## Association between host transcriptome and op microbiome mantel test
+
+```{r}
+tmp=dplyr::select(dna_meta,提取ID,sample_id)
+names(tmp)[2]="Run_DNA"
+op_meta=rna_meta_lab1[rna_meta_lab1$样本类型2=="OP",]
+op_meta=left_join(op_meta,tmp)
+op_meta=op_meta[order(op_meta$姓名缩写),]
+
+
+#########################
+library(vegan)
+micro_host_mantel_rna=data.frame(matrix(NA,4,4))
+rownames(micro_host_mantel_rna)=colnames(micro_host_mantel_rna)=c("T1","T2","T3","T4")
+micro_host_mantel_rna_p=micro_host_mantel_rna
+
+op_meta=op_meta[order(op_meta$姓名缩写),]
+
+microbiome_data=op_rna_species[,op_meta$seqID[op_meta$time==2 & op_meta$姓名缩写 %in% setdiff(t1_neg,c("YZX"))]]#,"SL"
+
+host_transcriptome_data=hrna_symbol[intersect(rownames(hrna_symbol),immune_gene_all1),
+                                    op_meta$Run[op_meta$time==1 & op_meta$姓名缩写 %in% setdiff(t1_neg,c("YZX"))]]#,"SL"
+
+total_counts <- colSums(host_transcriptome_data)
+host_transcriptome_data <- log2(sweep(host_transcriptome_data,2,total_counts,FUN = "/")*1e6+1)
+
+###mantel test
+microbiome_dist <- vegdist(microbiome_data %>% t(), method = "bray")
+hostomics_dist <- vegdist(host_transcriptome_data %>% t(), 
+                          method = "euclidean")
+
+mantel_result <- mantel(microbiome_dist, hostomics_dist, method = "spearman", 
+                        permutations = 9999)
+print(mantel_result)
+
+micro_host_mantel_rna["T2","T1"]=mantel_result$statistic
+micro_host_mantel_rna_p["T2","T1"]=mantel_result$signif
+
+#save(micro_host_mantel_rna,micro_host_mantel_rna_p,file = "dna_mantel.RData")
+
+pheatmap(rbind(micro_host_mantel_dna,micro_host_mantel_rna),
+         cluster_rows = F,cluster_cols = F,
+         color = colorRampPalette(colors=col)(100),
+         display_numbers = ifelse(rbind(micro_host_mantel_dna_p,micro_host_mantel_rna_p)<0.05,"*",""),
+         name = "Mantel statistic R",
+         legend_breaks = seq(-0.2, 0.2, length.out = 21),
+         legend_labels = c("-0.2", rep("", 4), "-0.1", rep("", 4), "0", 
+                   rep("", 4), "0.1", rep("", 4), "0.2")
+         )
+
+col=c("#053061","#2166AC","#4393C3","#92C5DE","#D1E5F0","#F7F7F7","#FDDBC7","#F4A582","#D6604D","#B2182B","#67001F")
+```
+
+
+```{r}
+
+op_virus_meta$t1_ct=ifelse(op_virus_meta$姓名缩写 %in% t1_neg,"T1_neg","T1_pos")
+rownames(op_virus_meta)=op_virus_meta$Run_DNA
+
+tmp=select(zr_individual_meta,姓名缩写,Age,Gender,BMI)
+names(tmp)[1]="Name"
+viral_response_op$viral_group=ifelse(viral_response_op$viral_load_t2_psedo1==0,"0","1")
+viral_response_op=left_join(viral_response_op,tmp)
+viral_response_op$viral_group=as.factor(viral_response_op$viral_group)
+
+all_res=data.frame()
+rownames(op_virus_meta)=op_virus_meta$Run_DNA
+
+t1=op_dna_species[,op_virus_meta$Run_DNA[op_virus_meta$time==4 & op_virus_meta$姓名缩写 %in% setdiff(t1_neg,"YZX")]] %>% t()
+
+
+rownames(t1)=op_virus_meta[rownames(t1),"姓名缩写"]
+t2=viral_response_op[,4:94]
+rownames(t2)=viral_response_op$Name
+t2=t2[rownames(t1),]
+all(rownames(t1)==rownames(t2))
+
+all2=c()
+for(i in c(1:71,74:88)){
+  data=t2[,i] %>% as.data.frame()
+  rownames(data)=rownames(t1)
+  names(data)="var"
+  cap <- dbrda(t1 ~ var,data = data,distance="bray",na.action=na.omit)
+  av <- anova.cca(cap,by = "margin") %>% as.data.frame()
+  pval <- av$`Pr(>F)`[1]
+  Fstat <- av$`F`[1]
+  cap1=dbrda(t1 ~ ., data=t2[,c(89:91)], # age, gender, bmi
+                distance="bray",na.action=na.omit)
+  r2 <- RsquareAdj(cap)[[1]] - RsquareAdj(cap1)[[1]]
+  adjr2 <- RsquareAdj(cap)[[2]] - RsquareAdj(cap1)[[2]]
+  all2 <- rbind(all2, cbind(Fstat,r2,adjr2,pval))
+}
+all2=as.data.frame(all2);all2$var=colnames(t2)[c(1:71,74:88)]
+
+all1=c()
+for(i in c(72,73)){
+  t1=t1[rownames(t2)[t2$viral_group==1],]
+  data=t2[t2$viral_group==1,i] %>% as.data.frame()
+  rownames(data)=rownames(t1)
+  names(data)="var"
+  cap <- dbrda(t1 ~ var,data = data,distance="bray",na.action=na.omit)
+  av <- anova.cca(cap,by = "margin") %>% as.data.frame()
+  pval <- av$`Pr(>F)`[1]
+  Fstat <- av$`F`[1]
+  cap1=dbrda(t1 ~ ., data=t2[t2$viral_group==1,c(89:91)], # age, gender, bmi
+                distance="bray",na.action=na.omit)
+  r2 <- RsquareAdj(cap)[[1]] - RsquareAdj(cap1)[[1]]
+  adjr2 <- RsquareAdj(cap)[[2]] - RsquareAdj(cap1)[[2]]
+  all1 <- rbind(all1, cbind(Fstat,r2,adjr2,pval))
+}
+all1=as.data.frame(all1);all1$var=colnames(t2)[c(72,73)]
+
+all2=rbind(all2,all1)
+all2$group="T1 DNA Species"
+
+#View(all2[all2$pval<0.05,])
+
+all_res=rbind(all_res,all2)
+
+####
+all_res_bray=all_res
+#all_res_clr=all_res
+####all res
+all_res_sig=all_res_bray[all_res_bray$pval< 0.05,]
+
+all_res_rna=data.frame()
+rownames(op_virus_meta)=op_virus_meta$seqID
+
+t1=op_rna_species[,op_virus_meta$seqID[op_virus_meta$time==4 & 
+                                                 op_virus_meta$姓名缩写 %in% setdiff(t1_neg,"YZX")]] %>% t()
+
+## clr normalized
+#t1=RNA_species_count[rownames(t1),colnames(t1)]
+#t1=compositions::clr(t(t1)+1)
+
+
+rownames(t1)=op_virus_meta[rownames(t1),"姓名缩写"]
+
+t2=viral_response_op[,4:91]
+rownames(t2)=viral_response_op$Name
+
+t2=t2[rownames(t1),]
+all(rownames(t1)==rownames(t2))
+
+
+all2=c()
+for(i in c(1:88)){
+  data=t2[,i] %>% as.data.frame()
+  rownames(data)=rownames(t1)
+  names(data)="var"
+  cap <- dbrda(t1 ~ var,data = data,distance="bray",na.action=na.omit)
+  av <- anova.cca(cap,by = "margin") %>% as.data.frame()#cap %>%  anova.cca %>%  as.data.frame
+  pval <- av$`Pr(>F)`[1]
+  Fstat <- av$`F`[1]
+  # cap1=dbrda(t1 ~ ., data=t2[,c(82:84)],
+  #               distance="bray",na.action=na.omit)#euclidean
+  r2 <- RsquareAdj(cap)[[1]]# - RsquareAdj(cap1)[[1]]
+  adjr2 <- RsquareAdj(cap)[[2]]# - RsquareAdj(cap1)[[2]]
+  all2 <- rbind(all2, cbind(Fstat,r2,adjr2,pval))
+}
+all2 <- as.data.frame(cbind(all2, padj=p.adjust(all2[,"pval"], method="BH")), stringsAsFactors=F)
+all2$var=colnames(t2)[1:88]
+all2$group="T4 RNA Species"
+
+all_res_rna=rbind(all_res_rna,all2)
+
+####
+all_res_rna_bray=all_res_rna
+
+#### heatmap for all res
+all2=rbind(all_res_bray,all_res_rna_bray)
+all2=all2[all2$pval<0.05,]
+
+all2$padj=p.adjust(all2$pval,method = "fdr")
+
+all2_plot=data.frame(matrix(NA,nrow = length(unique(all2$var)),ncol = length(unique(all2$group))))
+rownames(all2_plot)=unique(all2$var);colnames(all2_plot)=unique(all2$group)
+all2=rbind(all_res_bray,all_res_rna_bray)
+
+
+all2_plot1=all2_plot
+for(i in 1:nrow(all2_plot)){
+  for(j in 1:ncol(all2_plot)){
+    if(length(all2$adjr2[all2$var==rownames(all2_plot)[i] & all2$group==colnames(all2_plot)[j]])>0){
+      all2_plot[i,j]=all2$adjr2[all2$var==rownames(all2_plot)[i] & all2$group==colnames(all2_plot)[j]]
+      all2_plot1[i,j]=all2$pval[all2$var==rownames(all2_plot)[i] & all2$group==colnames(all2_plot)[j]]
+    }
+    
+  }
+}
+library(pheatmap)
+library(ComplexHeatmap)
+all2_plot[all2_plot1>0.05]=NA
+all2_plot[is.na(all2_plot)]=0
+all2_plot1[all2_plot==0]=1
+ComplexHeatmap::pheatmap(all2_plot*100,na_col = "white",
+                         cluster_rows = F,cluster_cols = F,
+                         color = viridis(50, option = "mako",direction = -1) ,
+                         display_numbers = matrix(ifelse(all2_plot1 < 0.05, "*", ""), nrow(all2_plot1)),
+                         main = "",
+                         name = "Explained variance (R2, %)")
+
+```
+
+
+```{r}
+viral_load_dbrda=rbind(all_res,all_res_rna)
+viral_load_dbrda=viral_load_dbrda[viral_load_dbrda$var %in% c("viral_load_t2","viral_group"),]
+
+viral_load_dbrda1=data.frame(matrix(NA,nrow = 8,ncol = 2))
+colnames(viral_load_dbrda1)=unique(viral_load_dbrda$var)
+rownames(viral_load_dbrda1)=unique(viral_load_dbrda$group)
+viral_load_dbrda1$viral_load_t2=viral_load_dbrda$r2[viral_load_dbrda$var=="viral_load_t2"]
+viral_load_dbrda1$viral_group=viral_load_dbrda$r2[viral_load_dbrda$var=="viral_group"]
+
+viral_load_dbrda2=viral_load_dbrda1
+viral_load_dbrda2$viral_load_t2=viral_load_dbrda$pval[viral_load_dbrda$var=="viral_load_t2"]
+viral_load_dbrda2$viral_group=viral_load_dbrda$pval[viral_load_dbrda$var=="viral_group"]
+
+pheatmap(viral_load_dbrda1,
+         cluster_rows = F,cluster_cols = F,
+         color = colorRampPalette(c("#F7F7F7","#FDDBC7","#F4A582","#D6604D","#B2182B","#67001F"))(50),
+         display_numbers = ifelse(viral_load_dbrda2<0.05,"*",""),
+         name = "dbRDA",
+         legend_breaks = seq(0.1, 0, length.out = 11)
+         )
+```
+
+##Figure4A
+```{r}
+fig4a <- read.csv("figure4A.csv")
+
+ggplot(fig4a,aes(x=group,y=value,fill=TIME,color=TIME))+
+  geom_bar(stat="identity",position = position_dodge(),width = 0.6)+
+  scale_fill_manual(values = color_five_times[1:4])+
+  scale_color_manual(values = color_five_times[1:4])+
+  theme_bw()+xlab("")+ylab("Explained variance by T2 viral load (%)")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1  ,size = 10),
+        axis.text.y = element_text(size = 10),
+        axis.title = element_text(size = 10),
+        legend.position = "right",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10)
+  )
+
+```
+
+
+
+## baseline microbes (species/genus) & T2 viral load (pos. vs neg. wilcox test)
+
+```{r}
+## op rna species
+rownames(op_virus_meta)=op_virus_meta$seqID
+t1=op_rna_species[,op_virus_meta$seqID[op_virus_meta$time==1 & 
+                                           op_virus_meta$t1_ct=="T1_neg" & 
+                                           op_virus_meta$姓名缩写!="YZX"]] %>% t()
+rownames(t1)=op_virus_meta[rownames(t1),"姓名缩写"]
+t1=t1[viral_response_op$Name,]
+all(rownames(t1)==viral_response_op$Name)
+
+op_rna_t1_viral_load=data.frame(taxa=colnames(t1),cor=NA,p_cor=NA,fc=NA,p_t.test=NA)
+for(i in 1:nrow(op_rna_t1_viral_load)){
+  test=wilcox.test(t1[viral_response_op$Name[viral_response_op$viral_group=="1"],i],
+                   t1[viral_response_op$Name[viral_response_op$viral_group=="0"],i])
+  op_rna_t1_viral_load$fc[i]=mean(t1[viral_response_op$Name[viral_response_op$viral_group=="1"],i])/mean(t1[viral_response_op$Name[viral_response_op$viral_group=="0"],i])
+  op_rna_t1_viral_load$p_t.test[i]=test$p.value
+  test=cor.test(t1[,i] %>% as.numeric(),viral_response_op$viral_load_t2,method = "spearman")
+  op_rna_t1_viral_load$cor[i]=test$estimate;op_rna_t1_viral_load$p_cor[i]=test$p.value
+}
+
+#op_rna_t1_viral_load$consistency=ifelse((op_rna_t1_viral_load$cor>0 & op_rna_t1_viral_load$fc>1)|(op_rna_t1_viral_load$cor<0 & op_rna_t1_viral_load$fc<1),"yes","no")
+#op_rna_t1_viral_load=op_rna_t1_viral_load[op_rna_t1_viral_load$consistency=="yes",];
+op_rna_t1_viral_load$p=apply(op_rna_t1_viral_load,1,function(x){min(x[3] %>% as.numeric(),x[5] %>% as.numeric())})
+op_rna_t1_viral_load$p.adj=p.adjust(op_rna_t1_viral_load$p,method = "fdr")
+
+
+## op dna species#
+rownames(op_virus_meta)=op_virus_meta$Run_DNA
+t1=op_dna_species[,op_virus_meta$Run_DNA[op_virus_meta$time==1 & 
+                                           op_virus_meta$t1_ct=="T1_neg" & 
+                                           op_virus_meta$姓名缩写!="YZX"]] %>% t()
+rownames(t1)=op_virus_meta[rownames(t1),"姓名缩写"]
+t1=t1[viral_response_op$Name,]
+all(rownames(t1)==viral_response_op$Name)
+
+op_dna_t1_viral_load=data.frame(taxa=colnames(t1),cor=NA,p_cor=NA,fc=NA,p_t.test=NA)
+for(i in 1:nrow(op_dna_t1_viral_load)){
+  test=wilcox.test(t1[viral_response_op$Name[viral_response_op$viral_group=="1"],i],
+                   t1[viral_response_op$Name[viral_response_op$viral_group=="0"],i])
+  op_dna_t1_viral_load$fc[i]=mean(t1[viral_response_op$Name[viral_response_op$viral_group=="1"],i])/mean(t1[viral_response_op$Name[viral_response_op$viral_group=="0"],i])
+  op_dna_t1_viral_load$p_t.test[i]=test$p.value
+  test=cor.test(t1[,i] %>% as.numeric(),viral_response_op$viral_load_t2_psedo1,method = "spearman")
+  op_dna_t1_viral_load$cor[i]=test$estimate;op_dna_t1_viral_load$p_cor[i]=test$p.value
+}
+
+#op_dna_t1_viral_load$consistency=ifelse((op_dna_t1_viral_load$cor>0 & op_dna_t1_viral_load$fc>1)|(op_dna_t1_viral_load$cor<0 & op_dna_t1_viral_load$fc<1),"yes","no")
+#op_dna_t1_viral_load=op_dna_t1_viral_load[op_dna_t1_viral_load$consistency=="yes",];
+op_dna_t1_viral_load$p=apply(op_dna_t1_viral_load,1,function(x){min(x[3] %>% as.numeric(),x[5] %>% as.numeric())})
+op_dna_t1_viral_load$p.adj=p.adjust(op_dna_t1_viral_load$p,method = "fdr")
+
+
+
+names(op_dna_t1_viral_load)[c(1,2,6,7)]=c("taxa","dna_cor","dna_p","dna_p.adj")
+names(op_rna_t1_viral_load)[c(1,2,6,7)]=c("taxa","rna_cor","rna_p","rna_p.adj")
+
+op_t1_micro_virus=full_join(op_dna_t1_viral_load[,c(1,2,6,7)],op_rna_t1_viral_load[,c(1,2,6,7)])
+rownames(op_t1_micro_virus)=op_t1_micro_virus$taxa
+sig_taxa=op_t1_micro_virus$taxa[op_t1_micro_virus$dna_p<0.05|op_t1_micro_virus$rna_p<0.05] %>% na.omit()
+
+up=op_t1_micro_virus[sig_taxa,"dna_cor"] %>% as.matrix()
+dn=op_t1_micro_virus[sig_taxa,"rna_cor"] %>% as.matrix()
+rownames(up)=sig_taxa;rownames(dn)=sig_taxa
+colnames(up)="cor";colnames(dn)="cor"
+identical(rownames(up), rownames(dn))
+identical(colnames(up), colnames(dn))
+
+up_p=op_t1_micro_virus[sig_taxa,"dna_p"] %>% as.matrix()
+dn_p=op_t1_micro_virus[sig_taxa,"rna_p"] %>% as.matrix()
+rownames(up_p)=sig_taxa;rownames(dn_p)=sig_taxa
+colnames(up_p)="p";colnames(dn_p)="p"
+
+up=up[order(up[,1],decreasing = T),] %>% as.data.frame()
+colnames(up)="cor"
+dn=dn[rownames(up),] %>% as.data.frame();up_p=up_p[rownames(up),] %>% as.data.frame();dn_p=dn_p[rownames(up),] %>% as.data.frame()
+
+UpColor <- colorRamp2(breaks = c(-1,-0.8,-0.6,-0.4,-0.2,0,0.2,0.4,0.6,0.8,1), 
+                      colors = rev(brewer.pal(n = 11, name = "RdBu")))
+DnColor <- colorRamp2(breaks = c(-1,-0.8,-0.6,-0.4,-0.2,0,0.2,0.4,0.6,0.8,1), 
+                      colors = rev(brewer.pal(n = 11, name = "RdBu")))
+
+DiagFunc <- function(up,up_p,down,down_p){
+function(j, i, x, y, width, height, fill){
+  
+grid.polygon(
+  unit.c(x - 0.5*width, x - 0.5*width, x + 0.5*width),
+  unit.c(y - 0.5*height, y + 0.5*height, y + 0.5*height),
+  gp = gpar(fill = DnColor(up[i, j]), col = "grey")
+  )
+  
+if(up_p[i,j]<0.05){
+  grid.text(label = "*",x - 0.15*width,y, gp = gpar(fontsize = 18,col="white"))}
+  
+grid.polygon(
+  unit.c(x + 0.5*width, x + 0.5*width, x - 0.5*width),
+  unit.c(y + 0.5*height, y - 0.5*height, y - 0.5*height),
+  gp = gpar(fill = UpColor(down[i, j]), col = "grey"))
+
+if((down_p[i,j]<0.05)){#(up[i,j]*down[i,j]>0) & 
+  grid.text(label = "*",x+ 0.15*width, y-0.3*height, gp = gpar(fontsize = 18,col="white"))}
+
+}
+}
+
+p1 <- Heatmap(up,
+rect_gp = gpar(type = "none"),
+show_heatmap_legend = F,
+row_names_side = "right",
+cluster_rows = F,
+cluster_columns = F, 
+column_names_gp = gpar(fontsize = 10),
+cell_fun = DiagFunc(up = up, down = dn,up_p = up_p,down_p = dn_p) 
+); p1
+
+legend <- Legend(
+  col_fun = UpColor,
+  title = "Correlation",
+  at = c(-0.6,-0.5,-0.4,-0.3,-0.2,0,0.2,0.3,0.4,0.5,0.6),  
+  labels_gp = gpar(fontsize = 10), 
+  title_gp = gpar(fontsize = 12, fontface = "bold")  
+)
+
+draw(legend, x = unit(0.5, "npc"), y = unit(0.5, "npc"), just = c("center", "center"))
+
+
+
+plotdata1=cbind(up,dn)
+plotdata2=cbind(up_p,dn_p)
+names(plotdata1)=names(plotdata2)=c("DNA","RNA")
+plotdata2=ifelse(plotdata2<0.001,"***",ifelse(plotdata2<0.01,"**",ifelse(plotdata2<0.05,"*","")))
+
+##Figure4D
+pheatmap(plotdata1[1:18,],
+         cluster_rows = F,cluster_cols = F,
+         color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(11),
+         breaks = c(-0.6,-0.5,-0.4,-0.3,-0.2,-0.1,0,0.1,0.2,0.3,0.4,0.5,0.6),
+         display_numbers = plotdata2[1:18,],
+         number_color = "white",
+         fontsize_number = 10
+         )
+##Figure4E
+pheatmap(plotdata1[19:35,],
+         cluster_rows = F,cluster_cols = F,
+         color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(11),
+         breaks = c(-0.6,-0.5,-0.4,-0.3,-0.2,-0.1,0,0.1,0.2,0.3,0.4,0.5,0.6),
+         display_numbers = plotdata2[19:35,],
+         number_color = "white",
+         fontsize_number = 10
+         )
+
+###
+
+
+```
+
+
+
+## baseline microbiome and host transciptome (GSEA for microbe & viral_load - correlated genes against proviral GO terms)
+```{r}
+## GSEA for correlated genes for each microbes in baseline
+# Immune genes from ImmPort 
+# gmt_file <- "F:/AAAA/Others/covid_urt_2024/gene_cate/all_gene_lists.gmt"
+# gene_sets <- getGmt(gmt_file)
+# gene_list <- geneIds(gene_sets)
+# 
+# rownames(op_dna_species)=gsub("g__.*\\|s__","",rownames(op_dna_species)) %>% gsub("c__.*\\|s__","",.) %>% gsub("f__.*\\|s__","",.) %>% gsub("d__.*\\|s__","",.)
+
+dna_t1_sample=op_t1_meta$Run_DNA#op_meta$Run_DNA[op_meta$time==1]
+rna_t1_sample=op_t1_meta$Run#op_meta$Run[op_meta$time==1]
+
+hrna_symbol.normalized_op_immue=hrna_symbol[intersect(union(immune_gene_all1,circ_OP$genes),rownames(hrna_symbol)),op_meta$Run]
+total_counts=colSums(hrna_symbol.normalized_op_immue)
+hrna_symbol.normalized_op_immue=log2(sweep(hrna_symbol.normalized_op_immue,2,total_counts,FUN = "/")*1e6+1)
+
+
+proviral_go=ego@result$ID[ego@result$p.adjust<0.05] ## 604个
+op_t1_proviral_go=vector("list", length = length(proviral_go))
+op_t1_proviral_go=lapply(proviral_go,function(x){
+  mget(c(x),org.Hs.egGO2ALLEGS)  %>% unlist() %>% as.character() %>% mapIds(org.Hs.eg.db,keys=.,column="SYMBOL",keytype="ENTREZID") %>% as.character()
+})
+names(op_t1_proviral_go)=ego@result$Description[ego@result$p.adjust<0.05]
+
+data=ego@result;data=data[order(data$p.adjust),];data=data[data$p.adjust<0.05,]
+op_t1_proviral_go=op_t1_proviral_go[data$Description]
+
+op_t1_ssgsea=ssgsea(inmat = hrna_symbol.normalized_op_immue,groups = op_t1_proviral_go,scale = F,minsize = 10)
+
+#######
+##top 100 GO terms
+##op_t1_ssgsea=op_t1_ssgsea[data$Description[1:100],]
+
+op_t1_ssgsea=op_t1_ssgsea[,viral_response_op$Run_T1]
+colnames(op_t1_ssgsea)=viral_response_op$Name
+
+t1_go_term_viral_load=data.frame(go_term=rownames(op_t1_ssgsea),cor=NA,p_cor=NA,fc=NA,p_t.test=NA)
+for(i in 1:nrow(t1_go_term_viral_load)){
+  test=cor.test(op_t1_ssgsea[i,] %>% as.numeric(),viral_response_op$viral_load_t2,method="spearman")
+  t1_go_term_viral_load$cor[i]=test$estimate;t1_go_term_viral_load$p_cor[i]=test$p.value
+  test=wilcox.test(op_t1_ssgsea[i,viral_response_op$Name[viral_response_op$viral_group==1]],
+                   op_t1_ssgsea[i,viral_response_op$Name[viral_response_op$viral_group==0]])
+  t1_go_term_viral_load$fc[i]=mean(op_t1_ssgsea[i,viral_response_op$Name[viral_response_op$viral_group==1]]+1)/mean(op_t1_ssgsea[i,viral_response_op$Name[viral_response_op$viral_group==0]]+1)
+  t1_go_term_viral_load$p_t.test[i]=test$p.value
+}
+t1_go_term_viral_load$consistency=ifelse((t1_go_term_viral_load$cor>0 & t1_go_term_viral_load$fc>1)|(t1_go_term_viral_load$cor<0 & t1_go_term_viral_load$fc<1),"yes","no")
+t1_go_term_viral_load$p=apply(t1_go_term_viral_load,1,function(x){min(x[3],x[5])})
+t1_go_term_viral_load$p.adj=p.adjust(t1_go_term_viral_load$p,method = "fdr")
+
+t1_go_term_viral_load_sig=t1_go_term_viral_load[t1_go_term_viral_load$cor>0 &t1_go_term_viral_load$p.adj<0.05 & t1_go_term_viral_load$consistency=="yes",]
+
+
+
+op_t1_ssgsea=op_t1_ssgsea[t1_go_term_viral_load_sig$go_term,]
+colnames(op_t1_ssgsea)=viral_response_op$Run_T1
+ssgsea_results_all=single_taxa[0,]
+for(taxa in as.character(sig_taxa)){
+  print(taxa)
+  single_taxa=data.frame(go_term=NA,cor=NA,p=NA)
+  for(go_term in rownames(op_t1_ssgsea)){
+    test=cor.test(op_dna_species[taxa,dna_t1_sample] %>% as.numeric(),
+                  op_t1_ssgsea[go_term,rna_t1_sample] %>% as.numeric(),
+                  method="spearman")
+    single_taxa=rbind(single_taxa,data.frame(go_term=go_term,cor=test$estimate %>% as.numeric(),p=test$p.value %>% as.numeric()))
+  }
+  single_taxa$taxa=taxa
+  single_taxa=single_taxa[!is.na(single_taxa$go_term),]
+  single_taxa$p.adj=p.adjust(single_taxa$p,method = "fdr")
+  ssgsea_results_all=rbind(ssgsea_results_all,single_taxa)
+}
+
+ssgsea_results_all$taxa_group=ifelse(ssgsea_results_all$taxa %in% rownames(up)[1:18],"Proviral","Antiviral")
+ssgsea_results_all$taxa=factor(ssgsea_results_all$taxa,levels = rownames(up))
+ssgsea_results_all$p.adj=p.adjust(ssgsea_results_all$p,method = "fdr")
+
+
+ssgsea_results_all_sig=ssgsea_results_all[ssgsea_results_all$p.adj<0.05,]#abs(ssgsea_results_all$cor)>0.6 & 
+#ssgsea_results_all_sig=ssgsea_results_all_sig[order(ssgsea_results_all_sig$taxa_group),]
+#ssgsea_results_all_sig$taxa=factor(ssgsea_results_all_sig$taxa,levels = unique(ssgsea_results_all_sig$taxa))
+ssgsea_results_all_sig=ssgsea_results_all_sig[order(ssgsea_results_all_sig$cor,decreasing = T),]
+ssgsea_results_all_sig$taxa_group=factor(ssgsea_results_all_sig$taxa_group,levels = c("Proviral","Antiviral"))
+ssgsea_results_all_sig$go_term=factor(ssgsea_results_all_sig$go_term,levels = rev(unique(ssgsea_results_all_sig$go_term)))
+
+###Figure4F
+ggplot(ssgsea_results_all_sig, aes(x = taxa, y = go_term, color = cor)) +
+  geom_point(aes(size = -log10(p.adj))) +
+  scale_color_gradient2(low = "#2166AC", mid = "white", high = "#B2182B", midpoint = 0) +
+  geom_text(aes(label=mediation),color = "white", size = 3)+
+  theme_bw() +  
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(x="",y="")+facet_grid(.~taxa_group,scales = "free_x")
+
+ssgsea_results_all_sig$pairs=apply(ssgsea_results_all_sig,1,function(x){paste(x[1],x[4],sep = "_")})
+mediation_res$pairs=apply(mediation_res,1,function(x){paste(x[1],x[2],sep = "_")})
+ssgsea_results_all_sig$mediation=ifelse(ssgsea_results_all_sig$pairs %in% mediation_res$pairs[mediation_res$forward_p<0.05 & mediation_res$rev_p>0.05],"+","")
+
+```   
+
+```{r}
+library(mediation)
+tmp=op_meta[op_meta$time==1 & op_meta$姓名缩写 %in% viral_response_op$Name,]
+rownames(tmp)=tmp$姓名缩写
+m=op_t1_ssgsea["membrane invagination",viral_response_op$Run_T1] %>% as.numeric()
+x=op_dna_species["Porphyromonas sp. oral taxon 275",tmp[viral_response_op$Name,"Run_DNA"]] %>% as.numeric()
+y=viral_response_op$viral_load_t2 %>% as.numeric()
+data <- data.frame(x = x, m = m, y = y)
+model.m <- glm(m ~ x, data = data,family = gaussian(link = "identity"))
+model.y <- glm(y ~ m + x, data = data,family = gaussian(link = "identity"))
+fit <- mediate(model.m, model.y, treat = "x", mediator = "m", boot = TRUE, sims = 1000)
+summary(fit)
+sens <- sensmediation::sensmediation(fit, RhoXM = seq(-0.5, 0.5, 0.1), RhoMY = seq(-0.5, 0.5, 0.1),
+                                     exp.name = "x",med.name = "m",out.model = model.y,med.model=model.m)
+summary(sens)
+
+## all mediation analysis
+mediation_res=data.frame(go_term=ssgsea_results_all_sig$go_term,taxa=ssgsea_results_all_sig$taxa,
+                         forward_med=NA,forward_p=NA,forward_ACME=NA,forward_nie_p=NA,
+                         rev_med=NA,rev_p=NA,rev_ACME=NA,rev_nie_p=NA)
+
+for(i in 1:nrow(mediation_res)){
+y=viral_response_op$viral_load_t2 %>% as.numeric()
+#####################
+##forward############
+#go term
+m=op_t1_ssgsea[mediation_res$go_term[i] %>% as.character(),viral_response_op$Run_T1] %>% as.numeric()
+## taxa
+x=op_dna_species[mediation_res$taxa[i] %>% as.character(),tmp[viral_response_op$Name,"Run_DNA"]] %>% as.numeric()
+data <- data.frame(x = x, m = m, y = y)
+model.m <- glm(m ~ x, data = data,family = gaussian(link = "identity"))
+model.y <- glm(y ~ m + x, data = data,family = gaussian(link = "identity"))
+fit <- mediate(model.m, model.y, treat = "x", mediator = "m", boot = TRUE, sims = 1000)
+tt=summary(fit)
+mediation_res$forward_med[i]=tt$n0
+mediation_res$forward_p[i]=tt$n0.p
+mediation_res$forward_ACME[i]=tt$d0
+sens <- sensmediation::sensmediation(fit, RhoXM = seq(-0.5, 0.5, 0.1), RhoMY = seq(-0.5, 0.5, 0.1),
+                                     exp.name = "x",med.name = "m",out.model = model.y,med.model=model.m)
+tt=summary(sens)
+mediation_res$forward_nie_p[i]=tt$effects[1,4]
+
+######################
+##reverse#############
+x=op_t1_ssgsea[mediation_res$go_term[i] %>% as.character(),viral_response_op$Run_T1] %>% as.numeric()
+## taxa
+m=op_dna_species_clr[mediation_res$taxa[i] %>% as.character(),tmp[viral_response_op$Name,"Run_DNA"]] %>% as.numeric()
+data <- data.frame(x = x, m = m, y = y)
+model.m <- glm(m ~ x, data = data,family = gaussian(link = "identity"))
+model.y <- glm(y ~ m + x, data = data,family = gaussian(link = "identity"))
+fit <- mediate(model.m, model.y, treat = "x", mediator = "m", boot = TRUE, sims = 1000)
+tt1=summary(fit)
+
+mediation_res$rev_med[i]=tt1$n0
+mediation_res$rev_p[i]=tt1$n0.p
+mediation_res$rev_ACME[i]=tt1$d0
+
+sens <- sensmediation::sensmediation(fit, RhoXM = seq(-0.5, 0.5, 0.1), RhoMY = seq(-0.5, 0.5, 0.1),
+                                     exp.name = "x",med.name = "m",out.model = model.y,med.model=model.m)
+tt=summary(sens)
+mediation_res$rev_nie_p[i]=tt$effects[1,4]
+
+
+}
+
+mediation_res$forward_p.adj=p.adjust(mediation_res$forward_p,method = "fdr")
+mediation_res$forward_nie_p.adj=p.adjust(mediation_res$forward_nie_p,method = "fdr")
+mediation_res$rev_p.adj=p.adjust(mediation_res$rev_p,method = "fdr")
+mediation_res$rev_nie_p.adj=p.adjust(mediation_res$rev_nie_p,method = "fdr")
+
+mediation_res_sig1=mediation_res[(mediation_res$forward_p.adj<0.05 & mediation_res$forward_nie_p<0.05) | (mediation_res$rev_p.adj<0.05 & mediation_res$rev_nie_p<0.05),]
+
+View(mediation_res_sig1[mediation_res_sig1$forward_p.adj<0.05 & mediation_res_sig1$forward_nie_p<0.05 & mediation_res_sig1$rev_p.adj<0.05 & mediation_res_sig1$rev_nie_p<0.05,])
+
+
+```
+
+```{r}
+## op rna genus
+rownames(op_virus_meta)=op_virus_meta$seqID
+t1=op_rna_genus[,op_virus_meta$seqID[op_virus_meta$time==1 & 
+                                           op_virus_meta$t1_ct=="T1_neg" & 
+                                           op_virus_meta$姓名缩写!="YZX"]] %>% t()
+rownames(t1)=op_virus_meta[rownames(t1),"姓名缩写"]
+t1=t1[viral_response_op$Name,]
+all(rownames(t1)==viral_response_op$Name)
+
+op_rna_t1_viral_load_genus=data.frame(taxa=colnames(t1),cor=NA,p_cor=NA,fc=NA,p_t.test=NA)
+for(i in 1:nrow(op_rna_t1_viral_load_genus)){
+  test=wilcox.test(t1[viral_response_op$Name[viral_response_op$viral_group=="1"],i],
+                   t1[viral_response_op$Name[viral_response_op$viral_group=="0"],i])
+  op_rna_t1_viral_load_genus$fc[i]=mean(t1[viral_response_op$Name[viral_response_op$viral_group=="1"],i])/mean(t1[viral_response_op$Name[viral_response_op$viral_group=="0"],i])
+  op_rna_t1_viral_load_genus$p_t.test[i]=test$p.value
+  test=cor.test(t1[,i] %>% as.numeric(),viral_response_op$viral_load_t2,method = "spearman")
+  op_rna_t1_viral_load_genus$cor[i]=test$estimate;op_rna_t1_viral_load_genus$p_cor[i]=test$p.value
+}
+
+#op_rna_t1_viral_load_genus$consistency=ifelse((op_rna_t1_viral_load_genus$cor>0 & op_rna_t1_viral_load_genus$fc>1)|(op_rna_t1_viral_load_genus$cor<0 & op_rna_t1_viral_load_genus$fc<1),"yes","no")
+#op_rna_t1_viral_load_genus=op_rna_t1_viral_load_genus[op_rna_t1_viral_load_genus$consistency=="yes",];
+
+op_rna_t1_viral_load_genus$p=apply(op_rna_t1_viral_load_genus,1,function(x){min(x[3] %>% as.numeric(),x[5] %>% as.numeric())})
+op_rna_t1_viral_load_genus$p.adj=p.adjust(op_rna_t1_viral_load_genus$p,method = "fdr")
+
+
+## op dna genus#
+rownames(op_virus_meta)=op_virus_meta$Run_DNA
+t1=op_dna_genus[,op_virus_meta$Run_DNA[op_virus_meta$time==1 & 
+                                           op_virus_meta$t1_ct=="T1_neg" & 
+                                           op_virus_meta$姓名缩写!="YZX"]] %>% t()
+rownames(t1)=op_virus_meta[rownames(t1),"姓名缩写"]
+t1=t1[viral_response_op$Name,]
+all(rownames(t1)==viral_response_op$Name)
+
+op_dna_t1_viral_load_genus=data.frame(taxa=colnames(t1),cor=NA,p_cor=NA,fc=NA,p_t.test=NA)
+for(i in 1:nrow(op_dna_t1_viral_load_genus)){
+  test=wilcox.test(t1[viral_response_op$Name[viral_response_op$viral_group=="1"],i],
+                   t1[viral_response_op$Name[viral_response_op$viral_group=="0"],i])
+  op_dna_t1_viral_load_genus$fc[i]=mean(t1[viral_response_op$Name[viral_response_op$viral_group=="1"],i])/mean(t1[viral_response_op$Name[viral_response_op$viral_group=="0"],i])
+  op_dna_t1_viral_load_genus$p_t.test[i]=test$p.value
+  test=cor.test(t1[,i] %>% as.numeric(),viral_response_op$viral_load_t2_psedo1,method = "spearman")
+  op_dna_t1_viral_load_genus$cor[i]=test$estimate;op_dna_t1_viral_load_genus$p_cor[i]=test$p.value
+}
+
+#op_dna_t1_viral_load_genus$consistency=ifelse((op_dna_t1_viral_load_genus$cor>0 & op_dna_t1_viral_load_genus$fc>1)|(op_dna_t1_viral_load_genus$cor<0 & op_dna_t1_viral_load_genus$fc<1),"yes","no")
+#op_dna_t1_viral_load_genus=op_dna_t1_viral_load_genus[op_dna_t1_viral_load_genus$consistency=="yes",];
+
+op_dna_t1_viral_load_genus$p=apply(op_dna_t1_viral_load_genus,1,function(x){min(x[3] %>% as.numeric(),x[5] %>% as.numeric())})
+op_dna_t1_viral_load_genus$p.adj=p.adjust(op_dna_t1_viral_load_genus$p,method = "fdr")
+
+
+names(op_dna_t1_viral_load_genus)[c(1,2,6,7)]=c("taxa","dna_cor","dna_p","dna_p.adj")
+names(op_rna_t1_viral_load_genus)[c(1,2,6,7)]=c("taxa","rna_cor","rna_p","rna_p.adj")
+
+op_t1_micro_virus_genus=full_join(op_dna_t1_viral_load_genus[,c(1,2,6,7)],op_rna_t1_viral_load_genus[,c(1,2,6,7)])
+rownames(op_t1_micro_virus_genus)=op_t1_micro_virus_genus$taxa
+sig_taxa_genus=op_t1_micro_virus_genus$taxa[op_t1_micro_virus_genus$dna_p<0.05|op_t1_micro_virus_genus$rna_p<0.05] %>% na.omit()
+
+up=op_t1_micro_virus_genus[sig_taxa_genus,"dna_cor"] %>% as.matrix()
+dn=op_t1_micro_virus_genus[sig_taxa_genus,"rna_cor"] %>% as.matrix()
+rownames(up)=sig_taxa_genus;rownames(dn)=sig_taxa_genus
+colnames(up)="cor";colnames(dn)="cor"
+identical(rownames(up), rownames(dn))
+identical(colnames(up), colnames(dn))
+
+up_p=op_t1_micro_virus_genus[sig_taxa_genus,"dna_p"] %>% as.matrix()
+dn_p=op_t1_micro_virus_genus[sig_taxa_genus,"rna_p"] %>% as.matrix()
+rownames(up_p)=sig_taxa_genus;rownames(dn_p)=sig_taxa_genus
+colnames(up_p)="p";colnames(dn_p)="p"
+
+plotdata1=cbind(up,dn)
+plotdata2=cbind(up_p,dn_p)
+colnames(plotdata1)=colnames(plotdata2)=c("DNA","RNA")
+plotdata2=ifelse(plotdata2<0.001,"***",ifelse(plotdata2<0.01,"**",ifelse(plotdata2<0.05,"*","")))
+
+pheatmap(plotdata1,
+         cluster_rows = F,cluster_cols = F,
+         color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(11),
+         breaks = c(-0.6,-0.5,-0.4,-0.3,-0.2,-0.1,0,0.1,0.2,0.3,0.4,0.5,0.6),
+         display_numbers = plotdata2,
+         number_color = "white",
+         na_col = "white",
+         fontsize_number = 10
+         )
+
+
+
+
+ssgsea_results_all_genus=single_taxa[0,]
+rownames(op_t1_meta)=op_t1_meta$姓名缩写
+colnames(op_t1_ssgsea)=op_t1_meta[colnames(op_t1_ssgsea),"Run"]
+
+for(taxa in as.character(sig_taxa_genus)){
+  print(taxa)
+  single_taxa=data.frame(go_term=NA,cor=NA,p=NA)
+  for(go_term in rownames(op_t1_ssgsea)){
+    test=cor.test(op_dna_genus[taxa,dna_t1_sample] %>% as.numeric(),
+                  op_t1_ssgsea[go_term,rna_t1_sample] %>% as.numeric(),
+                  method="spearman")
+    single_taxa=rbind(single_taxa,data.frame(go_term=go_term,cor=test$estimate %>% as.numeric(),p=test$p.value %>% as.numeric()))
+  }
+  single_taxa$taxa=taxa
+  single_taxa=single_taxa[!is.na(single_taxa$go_term),]
+  single_taxa$p.adj=p.adjust(single_taxa$p,method = "fdr")
+  ssgsea_results_all_genus=rbind(ssgsea_results_all_genus,single_taxa)
+}
+
+up1=rownames(up)[up_p[,"p"]<0.05 & up[,"cor"]>0]
+ssgsea_results_all_genus$taxa_group=ifelse(ssgsea_results_all_genus$taxa %in% (na.omit(up1) %>% as.character()),"Proviral","Antiviral")
+
+
+ssgsea_results_all_genus$taxa=factor(ssgsea_results_all_genus$taxa,levels =rownames(up)[order(up[,1],decreasing = T)])
+ssgsea_results_all_genus$p.adj=p.adjust(ssgsea_results_all_genus$p,method = "fdr")
+
+ssgsea_results_all_genus_sig=ssgsea_results_all_genus[ssgsea_results_all_genus$p.adj<0.05,]
+#abs(ssgsea_results_all_genus$cor)>0.6 & 
+#ssgsea_results_all_genus_sig=ssgsea_results_all_genus_sig[order(ssgsea_results_all_genus_sig$taxa_group),]
+#ssgsea_results_all_genus_sig$taxa=factor(ssgsea_results_all_genus_sig$taxa,levels = unique(ssgsea_results_all_genus_sig$taxa))
+ssgsea_results_all_genus_sig=ssgsea_results_all_genus_sig[order(ssgsea_results_all_genus_sig$cor,decreasing = T),]
+ssgsea_results_all_genus_sig$taxa_group=factor(ssgsea_results_all_genus_sig$taxa_group,levels = c("Proviral","Antiviral"))
+ssgsea_results_all_genus_sig$go_term=factor(ssgsea_results_all_genus_sig$go_term,levels = rev(unique(ssgsea_results_all_genus_sig$go_term)))
+
+
+ggplot(ssgsea_results_all_genus_sig, aes(x = taxa, y = go_term, color = cor)) +
+  geom_point(aes(size = -log10(p.adj))) +
+  scale_color_gradient2(low = "#2166AC", mid = "white", high = "#B2182B", midpoint = 0) +
+  theme_bw() +  
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(x="",y="")+facet_grid(.~taxa_group,scales = "free_x")
+```
+
+
+
+
