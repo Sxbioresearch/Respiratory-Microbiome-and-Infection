@@ -219,7 +219,6 @@ ggpairs(data,
 ```
 
 
-####差异基因和 富集分析
 ## Differential expressed genes and go term enrichment analysis
 ```{r}
 ####NP#########
@@ -232,7 +231,6 @@ names(meta.data)[1]="id"
 hrna_symbol_np=hrna_symbol[,meta.data$Run[meta.data$Type=="NP"]]
 colSums(hrna_symbol_np) %>% sort() %>% .[1:10]
 hrna_symbol_np=hrna_symbol_np[,colSums(hrna_symbol_np)>10000]
-##只保留配对样本
 meta.data.np=meta.data[meta.data$Type=="NP",]
 meta.data.np=meta.data.np[meta.data.np$Run %in% colnames(hrna_symbol_np),]
 all(meta.data.np$Run==colnames(hrna_symbol_np))
@@ -241,18 +239,15 @@ meta.data.np=meta.data.np[meta.data.np$id %in% tmp,]
 hrna_symbol_np=hrna_symbol_np[,meta.data.np$Run]
 all(meta.data.np$Run==colnames(hrna_symbol_np))
 colSums(hrna_symbol_np) %>% summary()
-
-#####过滤低表达gene 
+ 
 keepGene=lapply(tmp, function(x){
   tt=edgeR::cpm(hrna_symbol_np)[,meta.data.np$Run[meta.data.np$id==x]]
-  keepGene=rownames(tt)[rowSums(tt>5)>1] ###要求4个时间点都表达，会把那个在单独时间点表达量极高的gene扔掉
-  ####一个人的数据，至少在1个时间点cpm超过5
+  keepGene=rownames(tt)[rowSums(tt>5)>1] 
   return(keepGene)
 })
 keepGene_np=Reduce(union,keepGene)
 
 hrna_symbol_np=hrna_symbol_np[keepGene,]
-###104个样本，保留15505个gene做差异分析##
 
 meta.data.np$time=factor(meta.data.np$time,levels = c("1","2","3","4"),
                           labels = c("T1","T2","T3","T4"))
@@ -261,7 +256,7 @@ meta.data.np$id=as.factor(meta.data.np$id)
 #####DEG#####
 dds <- DESeqDataSetFromMatrix(countData = hrna_symbol_np+1, 
                               colData = meta.data.np, 
-                              design = ~ id+time)#+Age+Gender+BMI 配对的DEseq2是不存在这个问题的
+                              design = ~ id+time)#+Age+Gender+BMI 
 dds = DESeq(dds) ## time consuming
 
 contr <- makeContrasts(T2 - T1,T3 - T1,T4 - T1, 
@@ -285,7 +280,6 @@ for (i in seq_len(ncol(contr))){
 hrna_symbol_op=hrna_symbol[,meta.data$Run[meta.data$Type=="OP"]]
 colSums(hrna_symbol_op) %>% sort() %>% .[1:30]
 hrna_symbol_op=hrna_symbol_op[,colSums(hrna_symbol_op)>10000]
-##只保留配对样本
 meta.data.op=meta.data[meta.data$Type=="OP",]
 meta.data.op=meta.data.op[meta.data.op$Run %in% colnames(hrna_symbol_op),]
 all(meta.data.op$Run==colnames(hrna_symbol_op))
@@ -295,11 +289,9 @@ hrna_symbol_op=hrna_symbol_op[,meta.data.op$Run]
 all(meta.data.op$Run==colnames(hrna_symbol_op))
 colSums(hrna_symbol_op) %>% summary()
 
-#####过滤低表达gene
 keepGene=lapply(tmp, function(x){
   tt=edgeR::cpm(hrna_symbol_op)[,meta.data.op$Run[meta.data.op$id==x]]
   keepGene=rownames(tt)[rowSums(tt>5)>1] 
-  ####一个人的数据，至少在1个时间点cpm超过5
   return(keepGene)
 })
 keepGene_op=Reduce(union,keepGene)
@@ -320,7 +312,7 @@ res1=res[res$padj<0.05,]
 res1$tmp=abs(res1$log2FoldChange)
 res1=res1[order(res1$log2FoldChange,decreasing = T),]
 
-##Figure3A/B，NP就是res=DE.genes.deseq2.np_1w$`T2 - T1`
+##Figure3A/B
 p2=ggplot(res, aes(x = log2FoldChange, y = -log10(padj), colour = group))+
   geom_point()+scale_color_manual(values=c('brown','steelblue','gray'))+
   ylab('-log10 (q-value)')+#ylim(0,35)+
@@ -478,7 +470,6 @@ GOChord(chord_op,space = 0.02, gene.order = 'logFC', gene.space = 0.25, gene.siz
 ```
 
 
-## 量化感染后的抗病毒免疫激活程度: Gene的fold change、通路的delta ssGSEA富集得分, 病毒载量
 ```{r}
 viral_response_np=data.frame(Name=setdiff(t1_neg,"YZX"))
 tmp=rna_meta_lab1[rna_meta_lab1$姓名缩写 %in% viral_response_np$Name & rna_meta_lab1$样本类型2=="NP" & rna_meta_lab1$time==1,c("姓名缩写","Run")]
@@ -529,10 +520,10 @@ pheatmap(np_measures_cor$r %>% as.matrix(),
          show_rownames = TRUE, 
          show_colnames = TRUE,
          display_numbers = ifelse(np_measures_cor$P<0.05,"*",""),
-         scale = "none",   # 不对数据进行标准化
-         fontsize = 2,    # 字体大小
-         cellwidth = 2,    # 单元格宽度
-         cellheight = 2,   # 单元格高度
+         scale = "none",   
+         fontsize = 2,    
+         cellwidth = 2,   
+         cellheight = 2,  
          legend = TRUE,
          )
 ## measurements vs. days post symptom
@@ -712,8 +703,6 @@ pheatmap(op_measures_cor$r %>% as.matrix(),
          legend = TRUE)
 ```
 
-
-## 宿主免疫基因表达谱T1-T4和病毒载量的关系(dbRDA)
 ```{r}
 all_res_host=data.frame()
 rownames(op_virus_meta)=op_virus_meta$Run
@@ -772,7 +761,6 @@ pheatmap(t(viral_load_dbrda_host),
 ```
 
 
-## 基线期免疫基因和病毒载量的相关性
 ```{r}
 t1=hrna_symbol[intersect(rownames(hrna_symbol),unique(immune_gene_all1,circ_OP$genes)),
                                     op_meta$Run[op_meta$time==1 & op_meta$姓名缩写 %in% setdiff(t1_neg,c("YZX"))]]#,"SL"
@@ -801,20 +789,16 @@ t1_gene_viral_load$consistency=ifelse((t1_gene_viral_load$cor>0 & t1_gene_viral_
 
 t1_gene_viral_load_sig=t1_gene_viral_load[t1_gene_viral_load$consistency=="yes" & (t1_gene_viral_load$p_cor<0.05 | t1_gene_viral_load$p_t.test<0.05),]
 
-## spearman显著的是wilcox.test显著的子集？
 tmp1=t1_gene_viral_load_sig$genes[t1_gene_viral_load_sig$p_cor<0.05]
 tmp2=t1_gene_viral_load_sig$genes[t1_gene_viral_load_sig$p_t.test<0.05]
 
 t1_gene_viral_load_sig=t1_gene_viral_load_sig[t1_gene_viral_load_sig$genes %in% tmp1,]
 t1_gene_viral_load_sig=t1_gene_viral_load_sig[order(t1_gene_viral_load_sig$cor,decreasing = T),]
 
-
-##viral load related genes和已知host facors的关联
 host_factors=read.csv("hostfactors.csv")
 tmp=intersect(t1_gene_viral_load_sig$genes,host_factors$Gene.name)
 View(t1_gene_viral_load_sig[t1_gene_viral_load_sig$genes %in% tmp,])
 
-## GSEA，GO terms富集分析
 idss <- mapIds(org.Hs.eg.db,
                keys=t1_gene_viral_load_sig$genes[1:35],
                column="ENTREZID",
@@ -831,11 +815,8 @@ ego_top35 <- enrichGO(gene= idss,
                 readable      = TRUE)
 View(ego_top35@result)
 
-###富集的go terms中文献报道的基因
 
-##p值小于0.25的负相关物种
 t1_gene_viral_load_neg=t1_gene_viral_load[t1_gene_viral_load$consistency=="yes" & t1_gene_viral_load$cor<0 & (t1_gene_viral_load$p_cor<0.25|t1_gene_viral_load$p_t.test<0.25),]
-##没有antiviral的基线期基因，通路
 
 ##
 col=c("#053061","#2166AC","#4393C3","#92C5DE","#D1E5F0","#F7F7F7","#FDDBC7","#F4A582","#D6604D","#B2182B","#67001F")
@@ -861,9 +842,7 @@ pheatmap(tm1,
          legend_labels = c("-1", rep("", 4), "-0.5", rep("", 4), "0", 
                    rep("", 4), "0.5", rep("", 4), "1")
          )
-##↑替换成下面top20 GO term中包含的viral load相关基因
 
-###可视化富集的GO term
 data=ego@result[order(ego@result$p.adjust),] %>% .[1:20,]
 data$Description=factor(data$Description,levels = rev(data$Description))
 ggplot(data, aes(x =Description, y = -log10(p.adjust))) +
@@ -872,9 +851,6 @@ ggplot(data, aes(x =Description, y = -log10(p.adjust))) +
   labs(x = "", y = "-Log10(p.adjust)", title = "Top20 enriched pro-viral GO terms") +
   theme_test()
 
-
-##筛选富集的GO terms, 要求其ssGSEA score也和病毒载量正相关
-#560个pro-viral genes —> 604个 candidate pro-viral go terms —> 52个ssGSEA证实的Pro-viral go terms
 plotdata=ego@result[ego@result$p.adjust<0.05,]
 names(plotdata)[2]="go_term"
 names(plotdata)[6]="go_p.adj"
@@ -891,12 +867,8 @@ ggplot(plotdata[1:20,], aes(x = cor, y = go_term)) +
   labs(x = "Correlation between ssGSEA scores and viral load",y="Pro-viral GO terms") +
   theme_bw()
 
-
-##挑出来相关基因
 plotdata_genes=lapply(plotdata$geneID[1:20],function(x){strsplit(x,split = "\\/") %>% unlist()}) %>% unlist() %>% unique
 
-
-###和文献的overlap##
 host_factors=read.csv("hostfactors.csv")
 host_fac_genes=intersect(host_factors$Gene.name,t1_gene_viral_load_sig$genes)
 
@@ -917,46 +889,37 @@ ego_hostfac <- enrichGO(gene= idss,
 ego_hostfac@result=ego_hostfac@result[ego_hostfac@result$p.adjust<0.05,]
 View(ego_hostfac@result[ego_hostfac@result$Description %in% rownames(op_t1_ssgsea),])
 
-
-
-##证实的proviral genes
 proviral_genes=read.csv("proviral_genes.csv")
 intersect(proviral_genes$proviral_genes,t1_gene_viral_load_sig$genes)
 
 
-##venn图
-# 定义基因集合
-my_genes <- 560  # 您的560个基因
-literature_genes <- 5075  # 文献中的5075个基因
-overlap_genes <- 218  # 重叠的218个基因
+##venn
+my_genes <- 560  
+literature_genes <- 5075  
+overlap_genes <- 218  
 
-# 创建基因列表
+
 gene_lists <- list(
-  Your_Genes = t1_gene_viral_load_sig$genes,  # 假设您的基因编号为1到560
-  Literature_Genes = unique(host_factors$Gene.name)# 假设文献中的基因编号为1到10000中的5075个
+  Your_Genes = t1_gene_viral_load_sig$genes,  
+  Literature_Genes = unique(host_factors$Gene.name)
 )
 
-# 绘制Venn图
 ggVennDiagram(gene_lists, label = "count") +
-  theme(legend.position = "none") +  # 隐藏图例
-  ggtitle("")  # 添加标题
+  theme(legend.position = "none") +  
+  ggtitle("") 
 
-# 定义参数
-total_genes <- 25000  # 假设总基因数为30000（根据实际情况调整）
-my_genes <- 560  # 您的560个基因
-literature_genes <- 5075  # 文献中的5075个基因
-overlap_genes <- 218  # 重叠的218个基因
-
-# 超几何检验
+total_genes <- 25000  
+my_genes <- 560 
+literature_genes <- 5075 
+overlap_genes <- 218
 p_value <- phyper(
-  q = overlap_genes - 1,  # 重叠基因数减1
-  m = literature_genes,   # 文献中的基因数
-  n = total_genes - literature_genes,  # 总基因数减去文献中的基因数
-  k = my_genes,           # 您的基因数
-  lower.tail = FALSE      # 计算上尾概率
+  q = overlap_genes - 1,  
+  m = literature_genes,   
+  n = total_genes - literature_genes,  
+  k = my_genes,          
+  lower.tail = FALSE     
 )
 
-# 输出结果
 cat("p-value:", p_value, "\n")
 if (p_value < 0.05) {
   cat("The overlap is statistically significant (p < 0.05).\n")
@@ -970,7 +933,6 @@ if (p_value < 0.05) {
 ```
 
 
-## NP和OP的差异表达基因
 ```{r}
 np_t2_meta=rna_meta_lab1[rna_meta_lab1$样本类型2=="NP" & rna_meta_lab1$time==2,]
 np_t2_meta=np_t2_meta[np_t2_meta$姓名缩写 %in% op_t1_meta$姓名缩写,]
@@ -1002,8 +964,6 @@ res$gene=rownames(res)
 
 res_op_np_t1=res
 
-
-##去除T1就有差异的基因
 res=res_op_np_t2[!res_op_np_t2$gene %in% res_op_np_t1$gene[res_op_np_t1$group!="NS"],]
 
 res1=res[which(res$padj<0.05),]
@@ -1034,7 +994,6 @@ ggplot(res, aes(x = log2FoldChange, y = -log10(padj), colour = group))+
     legend.position ="none",
     strip.text = element_text(size = 15))
 
-##NP上调基因多为np_up_gene
 length(intersect(res$gene[res$group=="NP"],np_up_gene))
 
 
@@ -1080,7 +1039,7 @@ ggplot(cell_data1[cell_data1$time %in% c("1","2"),],aes(x = time,y=cell_Porp, fi
 
 ##Macrophages.M1,T.cells.regulatory..Tregs.,T.cells.follicular.helper
 
-##FigureS4B，替换成上述其他细胞的名字就可以画其他细胞
+##FigureS4B
 ggplot(cell_data1[cell_data1$time %in% c("1","2") & cell_data1$cell=="Macrophages.M1",],
        aes(x = time,y=cell_Porp, fill = time)) +
   scale_fill_manual(values = c("#FFB10F","#FFB10F","#FF9D9A","#FF9D9A"))+
@@ -1093,64 +1052,6 @@ wilcox.test(cell_data1[cell_data1$time=="1" & cell_data1$cell=="Macrophages.M1" 
             cell_data1[cell_data1$time=="1" & cell_data1$cell=="Macrophages.M1" & cell_data1$样本类型2=="NP","cell_Porp"])
 ```
 
-###2，3针疫苗感染者的差异
-```{r}
-np_t2_meta=rna_meta_lab1[rna_meta_lab1$样本类型2=="NP" & rna_meta_lab1$time==2,]
-np_t2_meta=np_t2_meta[np_t2_meta$姓名缩写 %in% op_t1_meta$姓名缩写,]
-op_t2_meta=rna_meta_lab1[rna_meta_lab1$样本类型2=="OP" & rna_meta_lab1$time==2,]
-op_t2_meta=op_t2_meta[op_t2_meta$姓名缩写 %in% op_t1_meta$姓名缩写,]
-
-all(op_t1_meta$姓名缩写==np_t1_meta$姓名缩写)
-all(op_t2_meta$姓名缩写==np_t2_meta$姓名缩写)
-
-colData=data.frame(samples=np_t2_meta$Run,
-                   cluster=rep("NP",27),
-                   姓名缩写=np_t2_meta$姓名缩写)
-colData=left_join(colData,select(zr_individual_meta,姓名缩写,Num.of.vaccinations))
-colData$Num.of.vaccinations=factor(colData$Num.of.vaccinations,levels = c("2","3"))
-table(colData$Num.of.vaccinations)
-
-dds <- DESeqDataSetFromMatrix(countData = hrna_symbol[rownames(hrna_symbol.normalized_np),np_t2_meta$Run]+1, #t1_gene_viral_load_sig$genes
-                              colData = colData, 
-                              design = ~ Num.of.vaccinations)
-#dds@assays=dds@assays[t1_gene_viral_load_sig$genes,]
-dds = DESeq(dds) ## time consuming
-
-res <- results(dds, contrast = c("Num.of.vaccinations", "2", "3")) %>% as.data.frame()
-res$group="NS"
-res$group[res$log2FoldChange>2 & res$padj<0.05]="3"
-res$group[res$log2FoldChange < -2 & res$padj<0.05]="2"
-res$group=factor(res$group,levels = c("2","3","NS"))
-table(res$group)
-res$gene=rownames(res)
-#res$log2FoldChange= -res$log2FoldChange
-
-res_np_t2_vac=res
-
-
-##看功能
-idss <- mapIds(org.Hs.eg.db,
-               keys=res_np_t2_vac$gene[res_np_t2_vac$group=="2"],
-               column="ENTREZID",
-               keytype="SYMBOL",
-               multiVals="first")
-
-tmp   <- enrichGO(gene= idss,
-                universe= names(geneList),
-                OrgDb= org.Hs.eg.db,
-                ont= "BP",
-                pAdjustMethod = "BH",
-                pvalueCutoff  = 0.05,
-                qvalueCutoff = 0.05,
-                readable      = TRUE)
-
-View(tmp@result[tmp@result$p.adjust<0.05 ,])
-
-
-```
-
-
-##OP差异上调基因在感染前后和病毒载量的关联
 ```{r}
 plotdata1=hrna_symbol.normalized_op[intersect(ISG_list_new,rownames(hrna_symbol.normalized_op)),viral_response_op$Run_T1]
 plotdata1_viral_load=data.frame(genes=rownames(plotdata1),cor=NA,p=NA)
@@ -1182,6 +1083,7 @@ pheatmap(plotdata1,
          )
 
 ```
+
 
 
 
