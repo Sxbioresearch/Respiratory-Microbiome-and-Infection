@@ -1,0 +1,543 @@
+
+
+```{r setup}
+Sys.setlocale('LC_CTYPE','Chinese_China.utf8')
+root <- 'F:/sunxiao_work/SARS-continuous'
+project <- file.path(root,'中日项目交接/中日项目交接')
+out <- file.path(root,'文章写作/第五次修改-w/model/MOFA_all_features_median_screen_ntree300_run_last')
+mofa_max_factors <- 10L    
+mofa_drop_r2 <- 0.01      
+rf_ntree <- 500L          
+dna_abundance_min <- 0.001 
+rna_abundance_min <- 0.01 
+microbe_abundance_unit <- 'fraction'  
+screen_p_cutoff <- 0.05
+use_fdr <- FALSE         
+host_rule <- 'original_spearman_direction_consistency' 
+python <- 'C:/Users/Lenovo/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/python.exe'
+python_packages <- file.path(root,'文章写作/第五次修改-w/model/python_packages')
+dir.create(out,recursive=TRUE,showWarnings=FALSE)
+suppressPackageStartupMessages({library(DESeq2);library(randomForest);library(pROC);library(reticulate)})
+use_python(python,required=TRUE)
+if(dir.exists(python_packages))py_run_string(sprintf('import sys; sys.path.insert(0, %s)',shQuote(python_packages)))
+stopifnot(py_module_available('mofapy2'))
+entry <- import('mofapy2.run.entry_point')
+e <- new.env();load(file.path(project,'2025.RData'),envir=e)
+v <- e$viral_response_op[order(e$viral_response_op$Name),]
+ids <- as.character(v$Name);n <- length(ids);stopifnot(n==27,!anyDuplicated(ids))
+Y <- v$viral_load_t2;Ypseudo <- v$viral_load_t2_psedo1
+stopifnot(length(Y)==n,all(is.finite(Y)))
+cutoff <- stats::median(Y)
+train_label <- factor(as.integer(Y >= cutoff),levels=c(0,1))
+stopifnot(!anyNA(train_label),length(unique(train_label))==2L)
+message(sprintf('T2 viral load median cutoff = %.8g; group counts: %s',
+ cutoff,paste(names(table(train_label)),as.integer(table(train_label)),collapse='; ')))
+write.csv(data.frame(participant_id=ids,T2_viral_load=Y,median_cutoff=cutoff,
+ label=train_label),file.path(out,'T2_median_binary_labels.csv'),row.names=FALSE)
+meta <- e$op_meta[e$op_meta$time==1,]
+meta <- meta[match(ids,meta[['姓名缩写']]),]
+stopifnot(identical(as.character(meta[['姓名缩写']]),ids),
+          !anyNA(meta$Run),!anyNA(meta$Run_DNA))
+required_objects <- c('hrna_symbol','immune_gene_all1','circ_OP','op_dna_species','op_rna_species','DNA_species_count')
+stopifnot(all(vapply(required_objects,exists,logical(1),envir=e,inherits=FALSE)))
+host_candidate_genes <- intersect(rownames(e$hrna_symbol),
+  unique(e$immune_gene_all1,e$circ_OP$genes))
+stopifnot(length(host_candidate_genes)>0,!anyDuplicated(host_candidate_genes))
+hc <- as.matrix(e$hrna_symbol[host_candidate_genes,meta$Run,drop=FALSE])
+colnames(hc) <- ids
+stopifnot(is.numeric(hc),all(is.finite(hc)),all(hc>=0),all(colSums(hc)>0))
+host_cpm <- sweep(hc,2,colSums(hc),'/')*1e6
+host_screen <- log2(host_cpm+1)
+
+dn <- as.matrix(e$op_dna_species[,meta$Run_DNA,drop=FALSE])
+colnames(dn) <- ids
+rna_id <- ifelse(meta$Run %in% colnames(e$op_rna_species),meta$Run,meta$seqID)
+if(anyNA(rna_id)) stop('RNA sample IDs could not be aligned to participants')
+rn <- as.matrix(e$op_rna_species[,rna_id,drop=FALSE])
+colnames(rn) <- ids
+dc <- as.matrix(e$DNA_species_count[,meta$Run_DNA,drop=FALSE])
+colnames(dc) <- ids
+
+stopifnot(microbe_abundance_unit %in% c('fraction','percent'),
+          host_rule == 'original_spearman_direction_consistency')
+if(microbe_abundance_unit == 'percent'){
+  dn <- dn / 100
+  rn <- rn / 100
+}
+stopifnot(nrow(hc)>0,nrow(dn)>0,nrow(rn)>0,nrow(dc)>0,
+          all(is.finite(dn)),all(is.finite(rn)),all(is.finite(dc)),
+          all(dn>=0),all(rn>=0),all(dc>=0),
+          max(dn)<=1+1e-6,max(rn)<=1+1e-6,
+          all(is.finite(Y)),all(is.finite(Ypseudo)))
+for(x in list(hc,dn,rn,dc)){
+ if(is.null(rownames(x)) || anyDuplicated(rownames(x)))
+  stop('特征名缺失或重复：请先回到上游汇总/修复数据，避免使用错误的基因或物种')
+}
+write.csv(data.frame(gene=host_candidate_genes),
+ file.path(out,'original_host_candidate_genes.csv'),row.names=FALSE)
+message('Original immune-related host candidate genes: ',nrow(hc))
+message(sprintf('Original-candidate feature space: host=%d, DNA species=%d, RNA species=%d, DNA count species=%d',
+ nrow(hc),nrow(dn),nrow(rn),nrow(dc)))
+write.csv(data.frame(
+ source=c('host_original_immune_candidates','DNA_op_dna_species','RNA_op_rna_species','DNA_species_count'),
+ available_features=c(nrow(hc),nrow(dn),nrow(rn),nrow(dc))),
+ file.path(out,'full_feature_source_audit.csv'),row.names=FALSE)
+
+```
+
+## 2. 从原免疫相关宿主候选集合及现有物种中，仅用训练折26人筛选
+
+重要区别：每折仅根据训练者的表达量/丰度决定**合格特征集**，再使用这26人的T2载量进行关联分析。
+不能先在全27人筛出560/35再做LOOCV。
+
+- 宿主：原完整免疫相关候选基因集合中，Spearman名义P<0.05且相关方向与训练者零/非零组均值差一致。最终条件与原host_analysis.Rmd一致；不要求Wilcoxon显著。
+- DNA：`op_dna_species` 的全部行，训练者相对丰度>0.1%（至少一人），Spearman(T2 `psedo1`) 或 Wilcoxon(T2中位数高/低组)。
+- RNA：`op_rna_species` 的全部行，训练者相对丰度>1%（至少一人），Spearman(T2连续载量) 或 Wilcoxon(T2中位数高/低组)。
+- 原始 `MOFA.Rmd` 最终用于微生物视图的是DNA物种**计数**经CLR转换。为与原分析可比，仍然从 `DNA_species_count` 取所选物种计数。RNA-only且无DNA计数的物种在日志中标记，不能冒充其有DNA计数。
+- 宿主固定名义P<0.05加方向一致性；use_fdr仅影响微生物筛选。无特征时停止，不根据AUC改参数。
+
+```{r screening}
+association_tests <- function(x, response, tr, case_group, include_wilcox=TRUE){
+  stopifnot(is.matrix(x),length(tr)==26L,length(case_group)==length(tr),
+            any(case_group),any(!case_group))
+  if(nrow(x)<1L) stop('No eligible features after fold-specific abundance/CPM filter')
+  yy <- response[tr]
+  if(sd(yy)<=1e-12) stop('Constant viral load within training fold')
+  ans <- t(vapply(seq_len(nrow(x)),function(i){
+    a <- as.numeric(x[i,tr])
+    if(any(!is.finite(a)) || sd(a)<1e-12)
+      return(c(r=0,p_cor=1,p_wilcox=1,difference=0))
+    cor_p <- suppressWarnings(cor.test(a,yy,method='spearman'))
+    wc <- if(include_wilcox)
+      suppressWarnings(wilcox.test(a[case_group],a[!case_group]))$p.value else 1
+    c(r=unname(cor_p$estimate),p_cor=cor_p$p.value,
+      p_wilcox=wc,difference=mean(a[case_group])-mean(a[!case_group]))
+  },numeric(4)))
+  ans <- data.frame(feature=rownames(x),ans,check.names=FALSE,row.names=NULL)
+  ans$p_cor[!is.finite(ans$p_cor)]<-1
+  ans$p_wilcox[!is.finite(ans$p_wilcox)]<-1
+  ans$FDR_cor <- p.adjust(ans$p_cor,method='BH')
+  ans$FDR_wilcox <- if(include_wilcox)
+    p.adjust(ans$p_wilcox,method='BH') else rep(1,nrow(ans))
+  ans
+}
+screen_features <- function(tr){
+  # Wilcoxon uses the SAME median-defined high/low groups as the RF target.
+  case_group <- as.character(train_label[tr]) == '1'
+  stopifnot(any(case_group),any(!case_group))
+  # 仅看这26人是否超过预先规定的检测/丰度阈值
+  # Original host screening has no additional CPM>5 filter at this stage.
+  good_genes <- rep(TRUE,nrow(hc))
+  good_dna <- rowSums(dn[,tr,drop=FALSE] > dna_abundance_min) >= 1L
+  good_rna <- rowSums(rn[,tr,drop=FALSE] > rna_abundance_min) >= 1L
+
+  # Preserve original host direction comparison: nonzero versus zero.
+  host_case_group <- Ypseudo[tr] != 0
+  stopifnot(any(host_case_group),any(!host_case_group))
+  h <- association_tests(host_screen[good_genes,,drop=FALSE],Y,tr,host_case_group,FALSE)
+  d <- association_tests(dn[good_dna,,drop=FALSE],Ypseudo,tr,case_group,TRUE)
+  r <- association_tests(rn[good_rna,,drop=FALSE],Y,tr,case_group,TRUE)
+
+  p_cor_col <- if(use_fdr)'FDR_cor' else 'p_cor'
+  p_wil_col <- if(use_fdr)'FDR_wilcox' else 'p_wilcox'
+  h$direction_consistent <- h$r * h$difference > 0
+  h$selected <- h$p_cor < 0.05 & h$direction_consistent
+  d$selected <- d[[p_cor_col]] < screen_p_cutoff |
+    d[[p_wil_col]] < screen_p_cutoff
+  r$selected <- r[[p_cor_col]] < screen_p_cutoff |
+    r[[p_wil_col]] < screen_p_cutoff
+
+  genes <- unique(h$feature[h$selected])
+  selected_dna <- unique(d$feature[d$selected])
+  selected_rna <- unique(r$feature[r$selected])
+  union_taxa <- union(selected_dna,selected_rna)
+  taxa <- intersect(union_taxa,rownames(dc))
+  excluded_rna_no_DNA <- setdiff(selected_rna,rownames(dc))
+  audit <- data.frame(
+    host_total_available=nrow(e$hrna_symbol),host_original_candidates=nrow(hc),host_tested=nrow(h),host_selected=length(genes),
+    DNA_total=nrow(dn),DNA_pass_abundance=nrow(d),
+    DNA_selected=length(selected_dna),
+    RNA_total=nrow(rn),RNA_pass_abundance=nrow(r),
+    RNA_selected=length(selected_rna),
+    selected_taxa_union=length(union_taxa),
+    selected_taxa_with_DNA_counts=length(taxa),
+    selected_RNA_taxa_without_DNA_counts=length(excluded_rna_no_DNA),
+    microbe_use_fdr=use_fdr,host_rule=host_rule,host_nominal_p_cutoff=0.05
+  )
+  list(genes=genes,taxa=taxa,union_taxa=union_taxa,
+       dna_taxa=selected_dna,rna_taxa=selected_rna,
+       rna_without_dna=excluded_rna_no_DNA,
+       host_tests=h,dna_tests=d,rna_tests=r,audit=audit)
+}
+```
+
+## 3. 冻结训练集VST
+
+下方公式对应本机DESeq2的getVarianceStabilizedData。
+local分支冻结整个变换函数，而非只冻结dispersionFunction。
+函数首先验证它对训练数据的结果与DESeq2内置结果一致，再用于测试者。
+
+```{r frozen_vst}
+freeze_vst <- function(d){
+ normalized <- counts(d,normalized=TRUE)
+ trend <- dispersionFunction(d);fit_type <- attr(trend,'fitType')
+ if(fit_type=='parametric'){
+  coefs <- attr(trend,'coefficients')
+  fun <- function(q)log((1+coefs['extraPois']+2*coefs['asymptDisp']*q+
+   2*sqrt(coefs['asymptDisp']*q*(1+coefs['extraPois']+coefs['asymptDisp']*q)))/(4*coefs['asymptDisp']))/log(2)
+ }else if(fit_type=='local'){
+  xg <- sinh(seq(asinh(0),asinh(max(normalized)),length.out=1000))[-1]
+  xim <- mean(1/sizeFactors(d))
+  integrand <- 1/sqrt(trend(xg)*xg^2+xim*xg)
+  splf <- splinefun(asinh((xg[-1]+xg[-length(xg)])/2),
+   cumsum((xg[-1]-xg[-length(xg)])*(integrand[-1]+integrand[-length(integrand)])/2))
+  h1 <- as.numeric(quantile(rowMeans(normalized),.95))
+  h2 <- as.numeric(quantile(rowMeans(normalized),.999))
+  eta <- (log2(h2)-log2(h1))/(splf(asinh(h2))-splf(asinh(h1)))
+  xi <- log2(h1)-eta*splf(asinh(h1))
+  stopifnot(is.finite(eta),is.finite(xi))
+  fun <- function(q)eta*splf(asinh(q))+xi
+ }else if(fit_type=='mean'){
+  alpha <- attr(trend,'mean')
+  fun <- function(q)(2*asinh(sqrt(alpha*q))-log(alpha)-log(4))/log(2)
+ }else stop('Unsupported VST fit type: ',fit_type)
+ expected <- assay(varianceStabilizingTransformation(d,blind=FALSE))
+ actual <- matrix(fun(normalized),nrow=nrow(normalized))
+ error <- max(abs(actual-expected))
+ if(!is.finite(error)||error>1e-6)stop('Frozen VST training check failed: ',error)
+ list(transform=fun,training=expected,error=error,type=fit_type,train_max=max(normalized))
+}
+prepare_host <- function(raw,tr,j){
+ stopifnot(all(raw>=0),all(abs(raw-round(raw))<1e-6))
+ raw <- raw[rowSums(raw[,tr,drop=FALSE])>0,,drop=FALSE]
+ counts1 <- round(raw)+1
+ # Same median-ratio size-factor estimator as original; reference from training only.
+ gm <- exp(rowMeans(log(counts1[,tr,drop=FALSE])))
+ sfraw <- apply(counts1[,tr,drop=FALSE],2,function(x)exp(median(log(x/gm))))
+ common <- exp(mean(log(sfraw)))
+ d <- DESeqDataSetFromMatrix(counts1[,tr,drop=FALSE],data.frame(row.names=ids[tr]),~1)
+ sizeFactors(d)<-sfraw/common
+ d<-DESeq(d,quiet=TRUE)
+ # Original blind=TRUE uses design ~1; refit the trend explicitly so it can be frozen.
+ d<-estimateDispersionsFit(d,fitType='parametric',quiet=TRUE)
+ fv<-freeze_vst(d)
+ sf_test<-exp(median(log(counts1[,j]/gm)))/common
+ qtest<-counts1[,j]/sf_test
+ h<-matrix(NA_real_,nrow(counts1),n,dimnames=list(rownames(counts1),ids))
+ h[,tr]<-fv$training;h[,j]<-fv$transform(qtest)
+ stopifnot(all(is.finite(h)))
+ list(matrix=h,type=fv$type,error=fv$error,
+      test_above_training_range=sum(qtest>fv$train_max),size_factor_test=sf_test)
+}
+```
+
+## 4. 只拟合训练者MOFA、逐折自动选因子，并投影测试者
+
+MOFA每折初始化最多10个因子，训练期间按 `dropR2=0.01` 过滤不活跃因子；之后用训练所得 `Z` 的实际列数 `k` 决定该折随机森林的输入维数。
+
+不调用原保存的全27人模型因子。W、Z和Tau全部从本折同一个Python后端读取，避免因子重新排序。
+输出选择特征数和MOFA实际保留特征数，二者可能因训练集零丰度/无方差过滤而不同。
+测试者不参与MOFA训练、中心化或缩放参数估计；高斯后验使用权重二阶矩。本诊断版使用同一投影公式获取训练者和测试者因子表示，并保存投影相对于MOFA原始Z的相关性、斜率、截距和RMSE。
+
+```{r mofa}
+fit_fold <- function(h,m,tr,j){
+ arrays<-list(host=h,microbiome=m)
+ arrays<-lapply(arrays,function(x){
+  x<-x[apply(x[,tr,drop=FALSE],1,sd)>1e-8,,drop=FALSE]
+  sweep(x,1,rowMeans(x[,tr,drop=FALSE]),'-')
+ })
+ stopifnot(all(vapply(arrays,nrow,1L)>0))
+ for(view in names(arrays))rownames(arrays[[view]])<-paste0(view,'::',make.unique(rownames(arrays[[view]])))
+ ent<-entry$entry_point()
+ ent$set_data_options(scale_views=FALSE,center_groups=TRUE)
+ ent$set_data_matrix(lapply(arrays,function(x)list(t(x[,tr,drop=FALSE]))),
+  views_names=names(arrays),samples_names=list(ids[tr]),
+  features_names=unname(lapply(arrays,rownames)),likelihoods=list('gaussian','gaussian'))
+ ent$set_model_options(factors=as.integer(mofa_max_factors),ard_factors=FALSE,ard_weights=TRUE,
+  spikeslab_factors=FALSE,spikeslab_weights=FALSE)
+ ent$set_train_options(iter=1000L,seed=42L,verbose=FALSE,
+  dropR2=mofa_drop_r2)
+ ent$build();ent$run()
+ nodes<-ent$model$getNodes()
+ w<-nodes[['W']]$getExpectations();z<-as.matrix(nodes[['Z']]$getExpectation())
+ tau<-nodes[['Tau']]$getExpectations();k<-ncol(z)
+ if(is.null(k) || k<1L) stop('MOFA没有保留因子，fold=',j,
+      '。请检查本折训练数据与预设dropR2阈值。')
+ stopifnot(nrow(z)==length(tr),k<=mofa_max_factors)
+ # 投影/随机森林后续维度使用实际k；不再假设固定为6
+ precision<-diag(k);rhs<-matrix(0,k,n)
+ for(ii in seq_along(arrays)){
+  ww<-as.matrix(w[[ii]][['E']]);ww2<-as.matrix(w[[ii]][['E2']])
+  tt<-colMeans(as.matrix(tau[[ii]][['E']]))
+  xx<-arrays[[ii]]
+  stopifnot(nrow(ww)==nrow(xx),length(tt)==nrow(xx))
+  precision<-precision+crossprod(ww,tt*ww)+diag(colSums(tt*pmax(ww2-ww^2,0)),nrow=k)
+  rhs<-rhs+crossprod(ww,tt*xx)
+ }
+ projected<-t(solve(precision,rhs))
+ # Diagnostic: a high correlation does NOT imply the same projection scale.
+ projected_train <- projected[tr,,drop=FALSE]
+ z_original <- z
+ check <- vapply(seq_len(k),function(q)
+  suppressWarnings(cor(projected_train[,q],z_original[,q])),numeric(1))
+ slope <- vapply(seq_len(k),function(q)
+  cov(projected_train[,q],z_original[,q])/var(z_original[,q]),numeric(1))
+ intercept <- colMeans(projected_train) - slope*colMeans(z_original)
+ rmse <- sqrt(colMeans((projected_train-z_original)^2))
+ diagnostic <- data.frame(fold=j,held_out=ids[j],factor=seq_len(k),
+  train_projection_cor=check,projection_vs_z_slope=slope,
+  projection_vs_z_intercept=intercept,projection_vs_z_rmse=rmse)
+ write.csv(diagnostic,
+  file.path(out,sprintf('fold_%02d_projection_check.csv',j)),row.names=FALSE)
+ if(any(!is.finite(check)) || min(check)<0.90)
+  warning('Fold ',j,': Gaussian projection differs markedly from original MOFA Z; ',
+          'interpret projection-based AUC cautiously.')
+
+ # Key correction: use THE SAME posterior projection for train and test.
+ # Estimate centering and scaling using the 26 TRAINING projections only.
+ mu <- colMeans(projected_train)
+ sdz <- apply(projected_train,2,sd)
+ if(any(!is.finite(sdz)|sdz<1e-10))
+  stop('Degenerate projected factor variance in fold ',j)
+ ztr <- scale(projected_train,center=mu,scale=sdz)
+ ztest <- scale(projected[j,,drop=FALSE],center=mu,scale=sdz)
+ colnames(ztr) <- paste0('Factor',seq_len(k))
+ colnames(ztest) <- colnames(ztr)
+ stopifnot(nrow(ztr)==length(tr),nrow(ztest)==1L,
+           ncol(ztr)==k,ncol(ztest)==k,all(is.finite(ztest)))
+ # Fixed, outcome-independent seed schedule. Not tuned to increase AUC.
+ set.seed(123+j)
+ rf<-randomForest(x=ztr,y=train_label[tr],ntree=rf_ntree,importance=TRUE)
+ probability<-as.numeric(stats::predict(rf,ztest,type='prob')[,'1'])
+ saveRDS(list(training_ids=ids[tr],held_out=ids[j],z_train=ztr,z_test=ztest,
+  z_original_training=z_original,projection_diagnostics=diagnostic,
+  W=w,Tau=tau,feature_names=lapply(arrays,rownames),centered_inputs=arrays,
+  initial_factors=mofa_max_factors,retained_factors=k,
+  dropR2=mofa_drop_r2,random_forest_ntree=rf_ntree,
+  random_forest=rf),file.path(out,sprintf('fold_%02d_model.rds',j)))
+ list(probability=probability,n_factors=k,n_host=nrow(arrays$host),
+  n_microbe=nrow(arrays$microbiome),projection_diagnostics=diagnostic)
+}
+```
+
+## 5. 单组学随机森林：仅使用本折筛选出的对应组学
+
+这里使用前面同一折计算出的 `host$matrix`（冻结VST）及 `micro`（CLR）。
+模型不会重新筛选整队列特征，也不会读取测试者标签。
+
+```{r single_omics}
+fit_single_rf <- function(x,tr,j,model_name) {
+ stopifnot(is.matrix(x), ncol(x)==n, model_name %in% c('Host','Microbiome'))
+ # 与MOFA一致：仅按训练者方差过滤，测试者不能参与过滤。
+ usable <- apply(x[,tr,drop=FALSE],1,function(a) all(is.finite(a)) && sd(a)>1e-8)
+ x <- x[usable,,drop=FALSE]
+ if(nrow(x)==0) stop('No usable ',model_name,' features in fold ',j)
+ if(any(!is.finite(x[,j,drop=FALSE]))) stop('Nonfinite held-out features in fold ',j)
+
+ xtr <- t(x[,tr,drop=FALSE])
+ xte <- t(x[,j,drop=FALSE])
+ feature_names <- make.unique(paste0(model_name,'::',rownames(x)))
+ colnames(xtr) <- feature_names
+ colnames(xte) <- feature_names
+ stopifnot(identical(colnames(xtr),colnames(xte)),
+           nrow(xtr)==length(tr),nrow(xte)==1L,
+           length(unique(train_label[tr]))==2L)
+ # 与整合模型一致的RF参数以及同折随机数种子。
+ set.seed(123+j)
+ rf <- randomForest(x=xtr,y=train_label[tr],ntree=rf_ntree,importance=TRUE)
+ probability <- as.numeric(stats::predict(rf,xte,type='prob')[,'1'])
+ if(!is.finite(probability)) stop('Invalid ',model_name,' prediction in fold ',j)
+ saveRDS(
+  list(model_name=model_name,training_ids=ids[tr],held_out=ids[j],
+       features=rownames(x),random_forest_ntree=rf_ntree,random_forest=rf,
+       held_out_probability=probability),
+  file.path(out,sprintf('fold_%02d_%s_model.rds',j,model_name))
+ )
+ list(probability=probability,n_features=nrow(x))
+}
+```
+
+## 6. 运行27折，并保存三个模型的逐人预测
+
+三个模型使用相同的 `tr` 和 `j`，**Microbiome-only/Host-only 不使用 MOFA 因子**。
+`fold_feature_counts.csv` 将同时记录三组模型每折实际使用的特征数量。
+每完成一折就保存一次进度；如筛选后任一组学无可用特征，沿用原文件的策略直接停止，不擅自改用top-N。
+
+```{r loocv}
+predictions <- data.frame(
+ Name=ids,training_label=train_label,
+ evaluation_label=train_label,  # 与RF训练标签完全一致：T2中位数高/低二分类
+ MOFA=NA_real_,Host=NA_real_,Microbiome=NA_real_
+)
+counts_by_fold <- data.frame()
+fold_screening_audit <- data.frame()
+projection_diagnostics_by_fold <- data.frame()
+feature_records <- list()
+
+for(j in seq_len(n)){
+ tr <- setdiff(seq_len(n),j)
+ selected <- screen_features(tr)
+ fold_screening_audit <- rbind(fold_screening_audit,
+  data.frame(fold=j,held_out=ids[j],selected$audit))
+ write.csv(fold_screening_audit,
+  file.path(out,'fold_screening_audit.csv'),row.names=FALSE)
+ # 即使某折没有选到任何特征，也先保存完整检验表以便排查
+ prefix <- file.path(out,sprintf('fold_%02d',j))
+ write.csv(selected$host_tests,paste0(prefix,'_host_tests.csv'),row.names=FALSE)
+ write.csv(selected$dna_tests,paste0(prefix,'_dna_tests.csv'),row.names=FALSE)
+ write.csv(selected$rna_tests,paste0(prefix,'_rna_tests.csv'),row.names=FALSE)
+ write.csv(data.frame(gene=selected$genes),paste0(prefix,'_selected_genes.csv'),row.names=FALSE)
+ write.csv(data.frame(taxon=selected$taxa),paste0(prefix,'_selected_microbes.csv'),row.names=FALSE)
+ write.csv(data.frame(taxon=selected$dna_taxa),paste0(prefix,'_selected_dna_taxa.csv'),row.names=FALSE)
+ write.csv(data.frame(taxon=selected$rna_taxa),paste0(prefix,'_selected_rna_taxa.csv'),row.names=FALSE)
+ write.csv(data.frame(taxon=selected$rna_without_dna),paste0(prefix,'_rna_taxa_missing_DNA_counts.csv'),row.names=FALSE)
+ if(length(selected$genes)==0 || length(selected$taxa)==0)
+  stop('Fold ',j,': no genes or DNA-count-represented species selected. ',
+       'Examine fold_screening_audit.csv and fold association tests; do NOT tune p-cutoff using held-out AUC.')
+ feature_records[[j]] <- list(
+  held_out=ids[j],training_ids=ids[tr],genes=selected$genes,
+  microbes=selected$taxa,union_taxa=selected$union_taxa,
+  dna_taxa=selected$dna_taxa,rna_taxa=selected$rna_taxa
+ )
+ saveRDS(feature_records,file.path(out,'fold_selected_features.rds'))
+
+ # 同一组已筛特征、同一次预处理供三个模型使用。
+ host <- prepare_host(hc[selected$genes,,drop=FALSE],tr,j)
+ micro_raw <- dc[selected$taxa,,drop=FALSE]
+ micro_raw <- micro_raw[rowSums(micro_raw[,tr,drop=FALSE])>0,,drop=FALSE]
+ if(nrow(micro_raw)==0) stop('No nonzero microbes in fold ',j)
+ micro <- log(micro_raw+1)
+ micro <- sweep(micro,2,colMeans(micro),'-') # 每个样本的CLR
+
+ ans_mofa <- fit_fold(host$matrix,micro,tr,j)
+ ans_host <- fit_single_rf(host$matrix,tr,j,'Host')
+ ans_micro <- fit_single_rf(micro,tr,j,'Microbiome')
+
+ projection_diagnostics_by_fold <- rbind(
+  projection_diagnostics_by_fold,ans_mofa$projection_diagnostics)
+ write.csv(projection_diagnostics_by_fold,
+   file.path(out,'MOFA_projection_diagnostics_all_folds.csv'),row.names=FALSE)
+ predictions$MOFA[j] <- ans_mofa$probability
+ predictions$Host[j] <- ans_host$probability
+ predictions$Microbiome[j] <- ans_micro$probability
+
+ counts_by_fold <- rbind(counts_by_fold,data.frame(
+  fold=j,held_out=ids[j],training_n=length(tr),
+  eligible_host_genes=nrow(selected$host_tests),
+  eligible_dna_species=nrow(selected$dna_tests),
+  eligible_rna_species=nrow(selected$rna_tests),
+  selected_genes=length(selected$genes),
+  selected_microbe_union=length(selected$union_taxa),
+  selected_microbes_in_DNA=length(selected$taxa),
+  MOFA_initial_factors=mofa_max_factors,
+  MOFA_dropR2=mofa_drop_r2,
+  RF_ntree=rf_ntree,
+  MOFA_host_features=ans_mofa$n_host,
+  MOFA_microbe_features=ans_mofa$n_microbe,
+  MOFA_factors=ans_mofa$n_factors,
+  Host_RF_features=ans_host$n_features,
+  Microbiome_RF_features=ans_micro$n_features,
+  VST_type=host$type,VST_training_error=host$error,
+  test_above_training_VST_range=host$test_above_training_range
+ ))
+ write.csv(counts_by_fold,file.path(out,'fold_feature_counts.csv'),row.names=FALSE)
+ write.csv(counts_by_fold[,c('fold','held_out','training_n',
+  'MOFA_initial_factors','MOFA_dropR2','MOFA_factors','RF_ntree')],
+  file.path(out,'MOFA_factors_selected_by_fold.csv'),row.names=FALSE)
+ write.csv(predictions,file.path(out,'three_model_LOOCV_predictions.csv'),row.names=FALSE)
+ # 保留原单模型预测文件名，避免使用者旧脚本读取失败。
+ write.csv(data.frame(Name=predictions$Name,
+  training_label=predictions$training_label,
+  evaluation_label=predictions$evaluation_label,
+  probability=predictions$MOFA),
+  file.path(out,'MOFA_LOOCV_predictions.csv'),row.names=FALSE)
+ message(sprintf(
+  'Fold %d/%d %s: MOFA retained=%d/%d; ntree=%d; genes=%d microbes=%d; MOFA=%.3f Host=%.3f Microbiome=%.3f',
+  j,n,ids[j],ans_mofa$n_factors,mofa_max_factors,rf_ntree,ans_host$n_features,ans_micro$n_features,
+  ans_mofa$probability,ans_host$probability,ans_micro$probability
+ ))
+}
+counts_by_fold
+```
+
+## 7. 三模型 ROC、AUC、95% CI 与输出
+
+以下均使用**27个未参与其对应折训练的预测概率**。
+95% CI 是固定逐人LOOCV预测/标签对的2000次分层bootstrap区间；
+bootstrap并没有重跑特征筛选、MOFA和RF，因此不代表整个模型开发过程的置信区间。
+
+ROC与AUC统一使用和随机森林训练相同的 `viral_load_t2` **中位数高/低二分类标签**。输出CSV将记录训练/评价标签和实际中位数阈值。
+
+```{r roc}
+model_names <- c('MOFA','Host','Microbiome')
+stopifnot(!anyNA(predictions[,model_names,drop=FALSE]),
+          identical(predictions$training_label,predictions$evaluation_label))
+roc_list <- setNames(lapply(model_names,function(m)
+ pROC::roc(predictions$evaluation_label,predictions[[m]],
+  levels=c('0','1'),direction='<',quiet=TRUE)),model_names)
+
+set.seed(123)
+performance <- do.call(rbind,lapply(model_names,function(m){
+ r <- roc_list[[m]]
+ ci <- pROC::ci.auc(r,method='bootstrap',boot.n=2000,boot.stratified=TRUE)
+ data.frame(
+  model=m,training_target='median_T2_viral_load',evaluation_target='median_T2_viral_load',
+  n=n,n_positive=sum(predictions$evaluation_label=='1'),
+  n_negative=sum(predictions$evaluation_label=='0'),
+  cutoff=cutoff,
+  AUC=as.numeric(pROC::auc(r)),
+  CI_low=as.numeric(ci[1]),CI_high=as.numeric(ci[3])
+ )
+}))
+write.csv(performance,file.path(out,'three_model_AUC_95CI.csv'),row.names=FALSE)
+write.csv(performance[performance$model=='MOFA',,drop=FALSE],
+ file.path(out,'MOFA_AUC_95CI.csv'),row.names=FALSE)
+
+colors <- c(MOFA='#E64B35',Host='#00A087',Microbiome='#3C5488')
+draw <- function(){
+ old_par <- par(pty='s') # Square plotting region
+ on.exit(par(old_par),add=TRUE)
+ first <- roc_list[['MOFA']]
+ plot(1-first$specificities,first$sensitivities,
+  type='l',col=colors['MOFA'],lwd=2.5,
+  xlab='1 - Specificity (FPR)',ylab='Sensitivity (TPR)',
+  xlim=c(0,1),ylim=c(0,1))
+ abline(0,1,lty=3,col='grey75')
+ for(m in c('Host','Microbiome')){
+  r <- roc_list[[m]]
+  lines(1-r$specificities,r$sensitivities,col=colors[m],lwd=2.5)
+ }
+ lab <- sprintf('%s  AUC %.3f (95%% CI %.3f-%.3f)',
+  performance$model,performance$AUC,
+  performance$CI_low,performance$CI_high)
+ legend('bottomright',legend=lab,col=colors[performance$model],
+  lwd=2.5,bty='n',cex=.72)
+ mtext(sprintf('Training and ROC: T2 viral load below vs >= median (cutoff=%.4g)',cutoff),
+  side=3,line=.3,cex=.8)
+}
+pdf(file.path(out,'MOFA_Host_Microbiome_ROC.pdf'),width=7,height=7)
+draw();dev.off()
+png(file.path(out,'MOFA_Host_Microbiome_ROC.png'),
+ width=2100,height=2100,res=300)
+draw();dev.off()
+performance
+draw()
+capture.output(sessionInfo(),file=file.path(out,'sessionInfo.txt'))
+```
+
+## 8. 全特征筛选、投影诊断及结果边界
+
+- 宿主恢复原完整免疫相关候选集合（预期约3370个，以实际对象为准），不是560个显著基因。每折26人独立重新筛选；无额外宿主CPM阈值。DNA/RNA仍从本版本既有矩阵出发。
+- 宿主在原候选集合直接进行折内关联筛选；微生物在训练内做丰度预过滤后关联筛选。最终基因数和物种数逐折变化；具体见 `fold_screening_audit.csv`。
+- RNA中显著、但DNA计数矩阵不存在的物种会被审计，不会伪造DNA计数。若你的科学目标要求把RNA-only物种作为分类输入，需要另行明确建立RNA表达特征视图，不能在此静默混用。
+- 必须检查 `hrna_symbol`、`op_dna_species`、`op_rna_species` 是否已被上游结局信息预先过滤；本版从这些**已存在的处理后矩阵**起步，并非对原始reads的完全端到端LOOCV。
+- `MOFA_projection_diagnostics_all_folds.csv` 汇总每折原始MOFA Z与高斯后验投影的相关性、线性斜率、截距及RMSE。投影若在训练者上与Z高度相关，但斜率明显偏离1，则原版确实存在训练/测试尺度不匹配风险。
+- 本版把训练和测试输入统一为自定义高斯后验投影。它解决**数值表示的一致性**，但不能保证投影就是MOFA2的精确后验，也不能保证AUC必然上升。
+- MOFA每折初始化最多10个因子，按26名训练者的数据应用 `dropR2=0.01` 自动剔除低贡献因子；实际数量存于 `MOFA_factors_selected_by_fold.csv`，并非按留出者AUC优化K。
+- 三个随机森林（MOFA、Host-only、Microbiome-only）均使用 `ntree=300`，参数应在分析前固定，不应根据AUC反复调参。
+- 训练、预测概率、ROC和AUC统一使用T2载量中位数高/低分组：`viral_load_t2 < cutoff`为0；`viral_load_t2 >= cutoff`为1，详见 `T2_median_binary_labels.csv`。
+- 特征筛选保留Spearman与Wilcoxon的组合规则；Spearman使用连续载量，Wilcoxon使用中位数高/低组。二者均只在训练折执行。
+- **局限：**中位数由全27人T2结局回顾性计算，故阈值本身也利用了留出者结局信息，不能声称这是完全无泄露的前瞻性LOOCV。严格检验应预先或借助外部样本规定cutoff。
+- 基于27人的样本量较小，且需要确认上游候选特征集是否由全队列结局筛出；LOOCV性能仍应作为探索性结果解释。
+- MOFA、Host、Microbiome三者比较具有相同的受试者拆分和训练规则，但只有在外部上游候选特征并非按全队列结局筛选时，才能进一步主张整个筛选流程未发生结局信息泄露。
+- 本Rmd为可在用户原Windows项目环境运行的代码。没有本地 `2025.RData`、DESeq2及mofapy2的可运行环境，无法在此文件中预填真实AUC结果。
